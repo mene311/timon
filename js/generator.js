@@ -251,20 +251,24 @@ export function voiceNotes(note, level, scale, root, vel = 100) {
   const dia = Array.isArray(scale) && scale.length >= 5;      // diatonic only for real scales, not chromatic runs
   const sc = dia ? scale : SCALES.major;
   const rt = dia ? (root | 0) : mod12(n);
-  const build = (semi) => {
-    const out = [{ note: n + (semi[0] | 0), vel }];      // the root sits at semi[0] (0, or -4 for the dominant)
+  const build = (semi, base = n) => {
+    const out = [{ note: base + (semi[0] | 0), vel }];   // the chord's root (semi[0]: 0, unless moved)
     for (const d of semi.slice(1)) {
-      const m = typeof d === "number" ? n + d : degreeUp(n, d, sc, rt);
+      const m = typeof d === "number" ? base + d : degreeUp(base, d, sc, rt);
       if (m > 0 && m < 128 && !out.some((o) => o.note === m)) out.push({ note: Math.round(m), vel });
     }
     return out.slice(0, VOICING_MAX_NOTES);
   };
   switch (level) {
     case 1: return build([0, 7]);                       // POWER
-    case 2: {                                            // TRIAD (diminished becomes its dominant)
+    case 2: {                                            // TRIAD
+      const i = degreeOf(n, sc, rt);
       const third = degreeUp(n, 2, sc, rt) - n, fifth = degreeUp(n, 4, sc, rt) - n;
-      if (third === 3 && fifth === 6) return build([-4, -1, 2]);
-      return build([0, third, fifth]);
+      if (third === 3 && fifth === 6 && i === sc.length - 1) {     // the leading tone: its dominant, in the scale
+        const base = degreeUp(n, -2, sc, rt);
+        return build([0, degreeUp(base, 2, sc, rt) - base, degreeUp(base, 4, sc, rt) - base], base);
+      }
+      return build([0, third, fifth]);                    // everything else as the scale has it (dim included)
     }
     case 3: return build([0, degreeUp(n, 2, sc, rt) - n, degreeUp(n, 4, sc, rt) - n, degreeUp(n, 6, sc, rt) - n]);
     case 4: return build([0, degreeUp(n, 4, sc, rt) - n, degreeUp(n, 2, sc, rt) - n + 12]);   // OPEN
