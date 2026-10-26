@@ -23,6 +23,8 @@ const DEFAULT = {
   lfoWave: "sine", lfoShape: 0, lfoAmp: 50, lfoOffset: 0, lfoRate: 4, octave: 0, gravity: 0, unipolar: false,
   spread: "uniform", bias: 0, quantSteps: 100, dejaVu: 0, loop: 8, loopFrom: 1,
   playMode: "slot",
+  // a DRUM track: no pitch, four lanes instead (the melody half is hidden, not duplicated)
+  drums: false, kick: 4, snare: 2, chh: 8, ohh: 0, lrot: 0, lgrid: 1,
 };
 const state = { ...DEFAULT };
 let bank = [];
@@ -565,10 +567,32 @@ function syncHeader() {
 // --------------------------------------------------------------------------- //
 // Generation
 // --------------------------------------------------------------------------- //
+// A drum track's 16 sequences: the four lanes of the Euclidean figure, each slot a rotation of it, so
+// the bank is a set of variations rather than 16 copies. No pitch, no scale, no chords.
+function drumBank() {
+  const out = [];
+  const rot0 = Math.round(state.lrot ?? 0);
+  for (let k = 0; k < SLOTS; k++) {
+    const steps = generateDrums({
+      rate: state.rate,
+      grid: Math.max(1, Math.round(state.lgrid ?? 1)),
+      accent: 12,
+      lanes: [
+        { pulses: Math.round(state.kick ?? 4), rotate: 0, vel: 112 },
+        { pulses: Math.round(state.snare ?? 2), rotate: 0, vel: 100 },
+        { pulses: Math.round(state.chh ?? 8), rotate: (rot0 + k) % 16, vel: 82 },
+        { pulses: Math.round(state.ohh ?? 0), rotate: (rot0 + k) % 16, vel: 92 },
+      ],
+    });
+    out.push({ length: Math.min(64, Math.round(state.length ?? 16)), rate: state.rate, steps });
+  }
+  return out;
+}
+
 function doGenerate(newSeed = false) {
   if (newSeed) state.seed = (Math.random() * 1e9) | 0;
   refs.seed?.setValue(state.seed, false);
-  bank = generateBank(state, state.drift);
+  bank = state.drums ? drumBank() : generateBank(state, state.drift);
   applyLocks();
   renderBank(); renderBuffer();
   saveTrackState();          // the bank and the knobs belong to the selected track
@@ -580,7 +604,7 @@ function scheduleRegen() {
   saveTrackState();          // the knobs are the selected track's
   clearTimeout(regenTimer);
   regenTimer = setTimeout(() => {
-    bank = generateBank(state, state.drift);
+    bank = state.drums ? drumBank() : generateBank(state, state.drift);
     applyLocks();
     renderBank(); renderBuffer();
   }, 40);
@@ -593,7 +617,18 @@ function scheduleRegen() {
 let tempoProbeTimer = null;
 let tempoProbeBusy = false;
 function scheduleTempoProbe() {
-  if (profile === "felucca") return;      // no 0x11 memory read on this firmware
+  if (profile === "felucca") {            // G_BPM, not the FM-1+VA memory read
+    if (!linkHas("pull") || !midi.hasAccess()) return;
+    clearTimeout(tempoProbeTimer);
+    tempoProbeTimer = setTimeout(() => {
+      if (tempoProbeBusy) return;
+      tempoProbeBusy = true;
+      const before = state.tempo;
+      skiffTempoRead().catch(() => null).finally(() => { tempoProbeBusy = false; })
+        .then((held) => { if (held && held !== before) status(`FM-1 BPM ${held} — synced`, "ok"); });
+    }, 600);
+    return;
+  }
   if (!midi.hasAccess()) return;
   clearTimeout(tempoProbeTimer);
   tempoProbeTimer = setTimeout(() => {
@@ -832,6 +867,44 @@ async function felSetStep(track, index, st) {
 }
 
 // GET/SET (2/3): scope 1 = a global parameter; v14 = 2 bytes (value + 8192).
+// The tempo is a global parameter (core.h: G_BPM = 0): both directions are plain GET/SET.
+const G_BPM = 0;
+async function skiffTempoRead() {
+  const v = await felGetGlobal(G_BPM);
+  if (v == null || v < 30 || v > 300) return null;
+  if (v !== state.tempo) { state.tempo = v; refs.tempo?.setValue(v, false); }
+  return v;
+}
+
+let tempoPushTimer = null;
+async function skiffTempoWrite() {
+  if (profile !== "felucca" || !midi.hasAccess() || !midi.findFm1()) return false;
+  return felSetGlobal(G_BPM, Math.round(state.tempo));
+}
+
+// tempo link: pull (the unit is master), push (the app is), both, or off
+const TEMPO_LINK_KEY = "fm1p-tempo-link";
+const TEMPO_LINKS = [["pull", "BPM ⤓", "tempo follows the FM-1"], ["push", "BPM ⤒", "the FM-1 follows the app"],
+                     ["both", "BPM ⤓⤒", "whichever changed last wins"], ["off", "BPM", "no tempo sync"]];
+let tempoLink = (() => { try { return localStorage.getItem(TEMPO_LINK_KEY) || "pull"; } catch { return "pull"; } })();
+const linkHas = (d) => tempoLink === "both" || tempoLink === d;
+
+function paintTempoLink() {
+  const b = document.getElementById("tempolink");
+  if (!b) return;
+  const row = TEMPO_LINKS.find(([k]) => k === tempoLink) ?? TEMPO_LINKS[0];
+  b.textContent = row[1];
+  b.title = row[2] + " — click to cycle";
+  b.classList.toggle("armed", tempoLink !== "off");
+}
+
+function scheduleTempoPush() {
+  if (!linkHas("push")) return;
+  clearTimeout(tempoPushTimer);
+  tempoPushTimer = setTimeout(() => {
+    skiffTempoWrite().then((ok) => { if (ok) status(`BPM ${Math.round(state.tempo)} → FM-1`, "ok"); }).catch(() => null);
+  }, 250);
+}
 async function felGetGlobal(id) {
   const r = await felReq(fel.CMD.GET, [1, id], 1500, 1);
   if (!r || r.length < 4) return null;
@@ -1263,11 +1336,12 @@ function sect(title, span, kids) {
 
 function buildRack() {
   const panel = document.getElementById("panel");
+  let pitchSect = null, shapeSect = null, lanesSect = null;
 
   panel.append(
     sect("Rhythm", 2, [
       R("tempo", knob({ label: "Tempo", min: 30, max: 300, value: state.tempo, def: DEFAULT.tempo, size: "lg",
-        format: (v) => `${Math.round(v)}`, onInput: setState("tempo"),
+        format: (v) => `${Math.round(v)}`, onInput: (v) => { setState("tempo")(v); scheduleTempoPush(); },
         onDblClick: () => {
           syncDeviceTempo().then((held) => {
             status(held ? `device holds ${held} BPM — Tempo synced` : "could not read the device tempo", held ? "ok" : "err");
@@ -1313,7 +1387,7 @@ function buildRack() {
       R("unipolar", rotary("Unipolar", [{ v: false, t: "off" }, { v: true, t: "on" }], state.unipolar, (v) => { state.unipolar = !!v; scheduleRegen(); }, "sm")),
     ]),
 
-    sect("Pitch", 2, [
+    pitchSect = sect("Pitch", 2, [
       R("lfoWave", rotary("Wave", LFO_WAVES.map((w) => ({ v: w, t: WAVE_SHORT[w] ?? w })), state.lfoWave, (v) => { state.lfoWave = v; scheduleRegen(); }, "sm")),
       R("lfoShape", knob({ label: "Shape", min: 0, max: 100, value: state.lfoShape, def: DEFAULT.lfoShape, size: "sm",
         format: (v) => `${Math.round(v)}%`, onInput: setState("lfoShape"),
@@ -1329,7 +1403,7 @@ function buildRack() {
         format: (v) => midiName(v), onInput: setState("root") })),
     ]),
 
-    sect("Shape", 6, [
+    shapeSect = sect("Shape", 6, [
       R("spread", rotary("Spread", ["constant", "bell", "uniform", "extremes"].map((s) => ({ v: s, t: s })), state.spread, (v) => { state.spread = v; scheduleRegen(); }, "sm")),
       R("bias", knob({ label: "Bias", min: -100, max: 100, value: state.bias, def: DEFAULT.bias, size: "md",
         format: (v) => `${Math.round(v)}`, onInput: setState("bias") })),
@@ -1352,6 +1426,32 @@ function buildRack() {
         format: (v) => `${Math.round(v)}%`, tip: "chance each step from Loop from onward copies the loop instead of playing a fresh note. 100% = solid repeat; copied steps get a dashed ring in the grid.", onInput: setState("dejaVu") })),
     ]),
   );
+
+  // the drum track's half of the rack: the same knobs, no new pages — four lane densities, the
+  // rotation of the figure across the 16 slots, and the grid the hits snap to.
+  lanesSect = sect("Lanes", 6, [
+    R("kick", knob({ label: "Kick", min: 0, max: 16, value: state.kick, def: DEFAULT.kick, size: "md",
+      format: (v) => `${Math.round(v)}`, tip: "Euclidean pulses per bar on the kick lane (GM 36). 4 = four on the floor.",
+      onInput: (v) => { state.kick = Math.round(v); scheduleRegen(); } })),
+    R("snare", knob({ label: "Snare", min: 0, max: 16, value: state.snare, def: DEFAULT.snare, size: "md",
+      format: (v) => `${Math.round(v)}`, tip: "Euclidean pulses per bar on the snare lane (GM 38). 2 = backbeat at 8/16.",
+      onInput: (v) => { state.snare = Math.round(v); scheduleRegen(); } })),
+    R("chh", knob({ label: "Hat", min: 0, max: 16, value: state.chh, def: DEFAULT.chh, size: "md",
+      format: (v) => `${Math.round(v)}`, tip: "Closed hat (GM 42). 8 = eighth notes.",
+      onInput: (v) => { state.chh = Math.round(v); scheduleRegen(); } })),
+    R("ohh", knob({ label: "Open hat", min: 0, max: 16, value: state.ohh, def: DEFAULT.ohh, size: "md",
+      format: (v) => `${Math.round(v)}`, tip: "Open hat (GM 46), choked by the closed hat on the unit.",
+      onInput: (v) => { state.ohh = Math.round(v); scheduleRegen(); } })),
+    R("lrot", knob({ label: "Rotate", min: 0, max: 15, value: state.lrot, def: DEFAULT.lrot, size: "md",
+      format: (v) => `${Math.round(v)}`, tip: "How far each of the 16 sequences turns the hat figure: slot k turns it Rotate + k steps.",
+      onInput: (v) => { state.lrot = Math.round(v); scheduleRegen(); } })),
+    R("lgrid", knob({ label: "Grid", min: 1, max: 4, value: state.lgrid, def: DEFAULT.lgrid, size: "md",
+      format: (v) => v == 1 ? "1/16" : v == 2 ? "1/8" : v == 3 ? "1/4·" : "1/4",
+      tip: "Snap the lane hits to the step grid: every step, every 2, every 4.", onInput: (v) => { state.lgrid = Math.round(v); scheduleRegen(); } })),
+  ]);
+  panel.append(lanesSect);
+  rackSections = { pitch: pitchSect, shape: shapeSect, lanes: lanesSect };
+  paintDrumMode();
 }
 
 // Short panel legends for the LFO waves: a real panel would not print
@@ -1527,6 +1627,25 @@ function readTrackStates() {
 // Says, in the header, whose knobs you are looking at and whether they are stored:
 // "T2 knobs ✓" (this track has its own) or "T2 knobs —" (nothing stored yet, so it
 // inherited what was on screen). It is the honest answer to "did that stick?".
+let rackSections = { pitch: null, shape: null, lanes: null };
+
+// A drum track shows lanes, not pitch: the melody half is hidden (not duplicated, not disabled in
+// place) so the same knobs keep doing the work and nothing is added to learn.
+function paintDrumMode() {
+  const on = !!state.drums;
+  for (const el of [rackSections.pitch, rackSections.shape]) if (el) el.style.display = on ? "none" : "";
+  if (rackSections.lanes) rackSections.lanes.style.display = on ? "" : "none";
+  const b = document.getElementById("drummode");
+  if (b) {
+    b.textContent = on ? "DRUM ✓" : "DRUM";
+    b.classList.toggle("armed", on);
+    b.title = on
+      ? `T${track + 1} is a drum track: pitch, scale and chords are off; the lanes and their Euclidean knobs are on. Click to make it a melody track again.`
+      : `T${track + 1} plays pitched notes. Click to make it a drum track (lanes K/S/H/O, no pitch section).`;
+  }
+  paintTrackState();
+}
+
 function paintTrackState() {
   const el = document.getElementById("trackstate");
   if (!el) return;
@@ -1585,7 +1704,9 @@ function switchTrack(t) {
   track = t;
   const saved = cur[track];
   if (typeof saved === "number") selected = Math.max(0, Math.min(SLOTS - 1, saved));
-  restoreTrackState(track);                 // knobs (or what is on screen if the track never stored any)
+  const hadState = restoreTrackState(track);  // knobs (or what is on screen if the track never stored any)
+  if (!hadState) state.drums = track === NTRK_DEFAULT - 1;   // T6 is the drum track until told otherwise
+  paintDrumMode();
   bank = generateBank(state, state.drift);  // the bank is the track's own, re-derived from its knobs
   applyLocks();
   const ft = document.getElementById("ftrack");
@@ -1849,6 +1970,32 @@ function buildTransport() {
   // column of the current project, so the knobs, the preset bank, Play and Freeze
   // all follow the one choice (they stay in lockstep with the selected cell).
   ft.addEventListener("change", () => switchTrack(felTrack()));
+  // DRUM: the track's own switch, kept with its knobs (T6 is a drum track by default below)
+  const db = document.createElement("button");
+  db.id = "drummode";
+  db.className = "glink";
+  db.textContent = "DRUM";
+  ft.insertAdjacentElement("afterend", db);
+  const tb = document.createElement("button");
+  tb.id = "tempolink";
+  tb.className = "glink";
+  db.insertAdjacentElement("afterend", tb);
+  paintTempoLink();                       // the button shows the stored state as soon as it exists
+  tb.addEventListener("click", () => {
+    const i = TEMPO_LINKS.findIndex(([k]) => k === tempoLink);
+    tempoLink = TEMPO_LINKS[(i + 1) % TEMPO_LINKS.length][0];
+    try { localStorage.setItem(TEMPO_LINK_KEY, tempoLink); } catch { /* blocked */ }
+    paintTempoLink();
+    status(`tempo link: ${TEMPO_LINKS.find(([k]) => k === tempoLink)[2]}`);
+    if (linkHas("pull")) scheduleTempoProbe();
+  });
+  db.addEventListener("click", () => {
+    state.drums = !state.drums;
+    saveTrackState();
+    paintDrumMode();
+    doGenerate(false);
+    status(state.drums ? `T${track + 1} is a drum track (lanes, no pitch)` : `T${track + 1} plays pitched notes`, "ok");
+  });
   document.getElementById("fill").addEventListener("click", doSendAll);
   document.getElementById("clearall").addEventListener("click",
     () => (profile === "felucca" ? doClearTrackFelucca() : doClearAll()));

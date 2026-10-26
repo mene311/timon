@@ -91,4 +91,51 @@ await (async () => {
   });
 })();
 
+
+// ---- drum mode and the tempo link ---------------------------------------------------------
+const sectByTitle = (title) => [...document.querySelectorAll("section.sect")]
+  .find((s) => s.querySelector("h3")?.textContent === title);
+
+await (async () => {
+  const ft = document.getElementById("ftrack");
+  ft.value = "5";                                        // T6: a drum track by default
+  ft.dispatchEvent(new window.Event("change"));
+  await sleep(10);
+
+  t("T6 comes up as a drum track", () => {
+    assert.equal(document.getElementById("drummode").textContent.trim(), "DRUM ✓");
+  });
+  t("a drum track hides the pitch section and shows the lanes", () => {
+    assert.equal(sectByTitle("Pitch").style.display, "none", "Pitch must be off");
+    assert.equal(sectByTitle("Shape").style.display, "none", "the pitch shaping knobs too");
+    assert.notEqual(sectByTitle("Lanes").style.display, "none", "the lanes must be shown");
+  });
+  t("the lane knobs are the four lanes plus rotate and grid", () => {
+    const labels = [...sectByTitle("Lanes").querySelectorAll(".k-lab")].map((e) => e.textContent.trim()).join(" ");
+    for (const w of ["Kick", "Snare", "Hat", "Open hat", "Rotate", "Grid"])
+      assert.ok(labels.includes(w), `missing ${w} in ${JSON.stringify(labels.slice(0, 120))}`);
+  });
+
+  // switching back to a melody track brings the pitch section back
+  ft.value = "0";
+  ft.dispatchEvent(new window.Event("change"));
+  await sleep(10);
+  t("a melody track gets Pitch and Shape back and loses the lanes", () => {
+    assert.equal(sectByTitle("Pitch").style.display, "", "Pitch must be visible");
+    assert.equal(sectByTitle("Lanes").style.display, "none", "the lanes must be hidden");
+    assert.equal(document.getElementById("drummode").textContent.trim(), "DRUM");
+  });
+})();
+
+t("the tempo link button exists, offers four states and remembers the choice", () => {
+  const b = document.getElementById("tempolink");
+  assert.ok(b, "no #tempolink");
+  assert.match(b.textContent, /BPM/);
+  const seen = new Set();
+  for (let i = 0; i < 4; i++) { seen.add(b.textContent); b.dispatchEvent(new window.Event("click")); }
+  assert.equal(seen.size, 4, `the four states: ${[...seen].join(" / ")}`);
+  assert.ok(localStorage.getItem("fm1p-tempo-link"), "the choice is stored");
+});
+
 console.log(`\n${n} ui tests passed`);
+
