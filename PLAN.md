@@ -33,3 +33,37 @@ desk or handheld.
 - DRUM lanes = GM 36/38/39/42/46/45/37/56; GM 35–81 table lives in
   `lancha/firmware/src/eng_drum.c` (`DRUM_GM`).
 - Xiaomi 14t: USB host + native MIDI stack confirmed (notes/android-capabilities.md).
+
+## Pattern matrix — revised against Skiff 2.0.1 (2026-10-25)
+
+Checked in the 2.0.1 source, not assumed: **`NPAT 64`** (`core.h`) — the pattern pool is 64
+patterns, ids 0..63, **shared by every track**; `BK_POOL NPAT` (`bank.c`) — the bank's pool is the
+whole 64; each track's song list has **16 entries** (A..P), and an entry stores a pattern id, a
+REST, or a REPEAT.
+
+So the thing Timón has to own is a **matrix of 6 tracks × 16 entries = 96 cells over a 64-pattern
+pool**: 96 cells > 64 patterns, so reuse is normal and expected (the same pattern on several
+tracks/entries is a feature, not a collision).
+
+What that changes from the first plan:
+
+- The generator emits **64 patterns**, not 16, and they go into the pool by id (0..63).
+- The grid is **6 rows (tracks) × 16 columns (entries A..P)**, each cell naming a pool id, REST or
+  REPEAT — freezes write the pool (all 64) plus the 6×16 layout, then read back to verify.
+- Everything that made pulses good stays: the sequencer/generator, drift, the bank-to-pool mapping
+  (a pulses bank of 16 is now one *quarter* of the pool: four banks fill 64).
+- "Freeze all" means: 64 pool patterns + 96 matrix cells, in one verified write.
+
+### Drum tracks: no second knob set
+
+The 6th track is almost always drums, so the melody half of the editor is dead weight there.
+Rule: **when a track's engine is DRUM/DRUM-X, the melody section is disabled, not duplicated.**
+
+- Notes are locked to lanes: kick / snare / closed hat / open hat (GM 36 / 38 / 42 / 46) first, the
+  rest of the GM lanes available behind a "more lanes" reveal.
+- The same knobs do the work: **EUCLIDEAN** (pulses / rotate / length) and **GRID SNAP** (quantise
+  the lane pattern to the step grid), plus density and velocity accent — no new knob pages.
+- A drum cell in the matrix shows lane hits as a compact row of marks (K S H O) instead of a note
+  name, so the 6th row reads at a glance.
+- Switching a track from a synth engine to DRUM re-labels the row; the pattern data for the synth
+  stays in the pool untouched (nothing is destroyed by switching).
