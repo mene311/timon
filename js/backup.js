@@ -1,96 +1,130 @@
-// backup.js — read the whole unit (BACKUP_LIST 65 / BACKUP_GET 66), byte for byte.
-// Skiff models its memory as 29 objects (2.0): 0 the project playing, 1 settings, 2..5 the stored
-// projects, 6/7 the user preset banks, 8 the FM6 bank, 9 the user presets, 16..31 the pattern bank
-// (four patterns a chunk: the 64-pattern pool), 32..34 the user sample slots. Each has a size and a
-// CRC-32; a read that does not match its CRC means the unit changed under us and the read is void.
+// backup.js — read the whole unit as Skiff's own complete archive (BACKUP_LIST 65 / BACKUP_GET 66).
 //
-// The wire encodings are Skiff's own (web/fm1ota.js, web/fm1backup.js): pack7 LSB first, u32 as five
-// 7-bit bytes.
-export const BACKUP = { LIST: 65, GET: 66, PUT: 67 };
+// The wire encodings and the file format follow Skiff's web/fm1backup.js (GPL-3.0, Leo Kuroshita /
+// Hügelton Instruments) exactly, so a file Timón writes is a Felucca/Skiff backup its editor and
+// installer can read and restore — not a private format of ours:
+//   - values are packed seven bytes into eight septets with a leading mask byte (bkPack / bkUnpack);
+//     this is NOT the generic pack7 of fm1ota.js, the two differ
+//   - BACKUP_GET answers: id, rc, offset u32, size lo, size hi, then the packed bytes
+//   - the archive is { format: "felucca-backup", version: 1, firmware, created, objects: [{id, size, crc, data}] }
+//     with data base64 and crc the zlib CRC-32 of the bytes
+// Objects: 0 the music playing, 1 settings, 2..5 stored projects, 6/7 user preset banks, 8 the FM6 bank,
+// 9 the user presets, 16..31 Skiff's pattern bank (four patterns a chunk), 32..34 the sample slots.
+export const BACKUP_CMD = { LIST: 65, GET: 66, PUT: 67 };
+const BANK_IDS = Array.from({ length: 16 }, (_, i) => 16 + i);
+export const BACKUP_IDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, ...BANK_IDS, 32, 33, 34];
+const BACKUP_IDS_V3 = BACKUP_IDS.filter((id) => id < 16 || id >= 32);
+const BACKUP_IDS_V2 = BACKUP_IDS_V3.filter((id) => id !== 9);
+const BACKUP_IDS_V1 = BACKUP_IDS_V2.filter((id) => id !== 8);
+export const idsOf = (n) => [BACKUP_IDS, BACKUP_IDS_V3, BACKUP_IDS_V2, BACKUP_IDS_V1].find((ids) => ids.length === n) || null;
+export const CHUNK = 256;
 
-export function pack7(data) {
-  const out = []; let acc = 0, nb = 0;
-  for (const b of data) {
-    acc |= (b & 0xFF) << nb; nb += 8;
-    while (nb >= 7) { out.push(acc & 0x7F); acc >>>= 7; nb -= 7; }
-  }
-  if (nb) out.push(acc & 0x7F);
-  return out;
+export const bkU32 = (n) => Array.from({ length: 5 }, (_, i) => (n >>> (i * 7)) & (i === 4 ? 15 : 127));
+export function bkR32(a, off = 0) {
+  if (a.length < off + 5 || a[off + 4] > 15) throw new Error("invalid archive number");
+  return (a[off] | a[off + 1] << 7 | a[off + 2] << 14 | a[off + 3] << 21 | a[off + 4] << 28) >>> 0;
 }
 
-export function unpack7(s) {
-  const out = []; let acc = 0, nb = 0;
-  for (const b of s) {
-    acc |= (b & 0x7F) << nb; nb += 7;
-    while (nb >= 8) { out.push(acc & 0xFF); acc >>>= 8; nb -= 8; }
+// seven bytes -> eight septets: a mask byte carries the bytes' bit 7
+export function bkPack(bytes) {
+  const a = [];
+  for (let off = 0; off < bytes.length; off += 7) {
+    const chunk = bytes.subarray(off, off + 7);
+    a.push(chunk.reduce((m, b, i) => m | (b >>> 7) << i, 0), ...chunk.map((b) => b & 127));
   }
-  return out;
+  return a;
 }
-
-export const u32 = (v) => [v & 0x7F, (v >> 7) & 0x7F, (v >> 14) & 0x7F, (v >> 21) & 0x7F, (v >>> 28) & 0x0F];
-export const r32 = (a, at = 0) => (a[at] | (a[at + 1] << 7) | (a[at + 2] << 14) | (a[at + 3] << 21) | (a[at + 4] << 28)) >>> 0;
-
-// zlib's CRC-32
-let crcTable = null;
-export function crc32(bytes) {
-  if (!crcTable) {
-    crcTable = new Uint32Array(256);
-    for (let n = 0; n < 256; n++) {
-      let c = n;
-      for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
-      crcTable[n] = c >>> 0;
+export function bkUnpack(a, size) {
+  const out = new Uint8Array(size); let i = 0, j = 0;
+  while (j < size) {
+    const n = Math.min(7, size - j), mask = a[i++];
+    if (mask == null || mask >>> n) throw new Error("invalid archive bytes");
+    for (let k = 0; k < n; k++) {
+      if (a[i] == null || a[i] > 127) throw new Error("short archive chunk");
+      out[j++] = a[i++] | (mask >>> k & 1) << 7;
     }
   }
+  if (i !== a.length) throw new Error("trailing archive bytes");
+  return out;
+}
+
+export function bkCrc(bytes) {
   let c = 0xFFFFFFFF;
-  for (const b of bytes) c = crcTable[(c ^ b) & 0xFF] ^ (c >>> 8);
-  return (c ^ 0xFFFFFFFF) >>> 0;
-}
-
-// One object's id, size, crc from a BACKUP_LIST reply (op, rc, count, then id, size, crc per object).
-export function decodeList(args) {
-  const rc = args?.[1] ?? 0, count = args?.[2] ?? 0, objects = [];
-  let at = 3;
-  for (let i = 0; i < count && at + 11 <= args.length; i++) {   // id + size u32 + crc u32 = 11 bytes
-    objects.push({ id: args[at], size: r32(args, at + 1), crc: r32(args, at + 6) });
-    at += 11;
+  for (const b of bytes) {
+    c ^= b;
+    for (let k = 0; k < 8; k++) c = c >>> 1 ^ (c & 1 ? 0xEDB88320 : 0);
   }
-  return { rc, objects };
+  return (~c) >>> 0;
 }
 
-// Read one object, piece by piece, and check it against the list's CRC.
-// dev.getObject(id, offset, count) answers { rc, offset, data } with at most 256 decoded bytes.
-export async function readObject(dev, obj, { piece = 256, onProgress = () => {} } = {}) {
-  if (!obj.size) return { ...obj, data: new Uint8Array(0) };
-  const out = new Uint8Array(obj.size);
-  let at = 0;
-  while (at < obj.size) {
-    const n = Math.min(piece, obj.size - at);
-    const r = await dev.getObject(obj.id, at, n);
-    if (!r || r.rc !== 0) throw new Error(`object ${obj.id}: the unit refused at byte ${at}${r?.rc === 3 ? " (it is playing)" : ""}`);
-    if (r.offset !== at) throw new Error(`object ${obj.id}: the unit answered offset ${r.offset} where ${at} was asked`);
-    if (r.data.length !== n) throw new Error(`object ${obj.id}: asked ${n} bytes at ${at}, got ${r.data.length}`);
-    out.set(r.data, at);
-    at += n;
-    onProgress(obj.id, at, obj.size);
-  }
-  const got = crc32(out);
-  if (obj.crc && got !== obj.crc) throw new Error(`object ${obj.id}: CRC ${got.toString(16)} but the unit listed ${obj.crc.toString(16)} - the unit changed while reading`);
-  return { ...obj, data: out };
+const rcText = { 1: "invalid archive object", 2: "the data failed validation", 3: "the unit is playing: stop it",
+                 4: "flash write failed", 5: "start a fresh backup" };
+export function bkCheck(rc) { if (rc) throw new Error(rcText[rc] ?? `archive error ${rc}`); }
+
+// The manifest: the ids must be exactly the list the unit's count implies, with sane sizes.
+export function bkManifest(a) {
+  if (a?.[0] !== 1) throw new Error("unsupported archive protocol");
+  bkCheck(a[1]);
+  const ids = idsOf(a[2]);
+  if (!ids || a.length !== 3 + a[2] * 11) throw new Error("incomplete archive manifest");
+  return ids.map((id, i) => {
+    const p = 3 + i * 11;
+    if (a[p] !== id) throw new Error("unexpected archive object");
+    const size = bkR32(a, p + 1), crc = bkR32(a, p + 6);
+    if (size > (id >= 32 ? 81920 : 3840) || (!size && crc)) throw new Error("archive object too large");
+    return { id, size, crc };
+  });
 }
 
-// Every object: the unit's backup, as bytes.
-export async function readArchive(dev, opts = {}) {
-  const list = decodeList(await dev.backupList());
-  if (list.rc !== 0) throw new Error(`BACKUP_LIST refused (rc ${list.rc})`);
+const b64 = (bytes) => { let s = ""; for (const b of bytes) s += String.fromCharCode(b); return btoa(s); };
+
+// Read the whole unit into a Felucca backup file (the same object shape Skiff's editor writes).
+export async function captureBackup(dev, firmware = "", onProgress = () => {}) {
+  const manifest = bkManifest(await dev.backupList());
   const objects = [];
-  for (const o of list.objects) objects.push(await readObject(dev, o, opts));
-  return { objects, bytes: objects.reduce((n, o) => n + o.data.length, 0) };
+  const total = manifest.reduce((n, o) => n + o.size, 0);
+  let done = 0;
+  for (const o of manifest) {
+    const bytes = new Uint8Array(o.size);
+    for (let off = 0; off < o.size; off += CHUNK) {
+      const size = Math.min(CHUNK, o.size - off);
+      const a = await dev.getObject(o.id, off, size);
+      bkCheck(a[1]);
+      if (a[0] !== o.id || bkR32(a, 2) !== off || (a[7] | a[8] << 7) !== size)
+        throw new Error(`object ${o.id}: unexpected reply at byte ${off}`);
+      bytes.set(bkUnpack(a.slice(9), size), off);
+      done += size;
+      onProgress(done, total);
+    }
+    if (bkCrc(bytes) !== o.crc) throw new Error("the unit changed during the backup - try again while stopped");
+    objects.push({ id: o.id, size: o.size, crc: o.crc, data: b64(bytes) });
+  }
+  const file = { format: "felucca-backup", version: 1, firmware, created: new Date().toISOString(), objects };
+  readBackup(file);                                    // validate what we are about to hand out
+  return file;
 }
 
-// A short description of an archive, for the panel.
+// Validate a backup file (ours or Skiff's) without touching the unit.
+export function readBackup(file) {
+  if (typeof file === "string") file = JSON.parse(file);
+  const ids = file && Array.isArray(file.objects) ? idsOf(file.objects.length) : null;
+  if (!file || file.format !== "felucca-backup" || file.version !== 1 || !ids)
+    throw new Error("not a complete Felucca backup");
+  const objects = file.objects.map((o, i) => {
+    if (!o || o.id !== ids[i] || !Number.isInteger(o.size) || o.size < 0 || o.size > (o.id >= 32 ? 81920 : 3840) ||
+        !Number.isInteger(o.crc) || o.crc < 0 || o.crc > 0xFFFFFFFF || typeof o.data !== "string" ||
+        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(o.data))
+      throw new Error("invalid backup object");
+    const bytes = Uint8Array.from(atob(o.data), (c) => c.charCodeAt(0));
+    if (bytes.length !== o.size || bkCrc(bytes) !== o.crc) throw new Error("backup checksum mismatch");
+    return { ...o, bytes };
+  });
+  if (!objects[0].size || !objects[1].size) throw new Error("the backup is missing the current music or the settings");
+  return { ...file, objects };
+}
+
 export function summariseArchive(a) {
-  const n = a.objects.length;
-  const bytes = a.objects.reduce((k, o) => k + o.data.length, 0);
-  const named = a.objects.filter((o) => o.size > 0);
-  return `${n} objects · ${(bytes / 1024).toFixed(1)} KB · ${named.length} with data`;
+  const bytes = a.objects.reduce((k, o) => k + o.size, 0);
+  const withData = a.objects.filter((o) => o.size > 0).length;
+  return `${a.objects.length} objects · ${(bytes / 1024).toFixed(1)} KB · ${withData} with data`;
 }

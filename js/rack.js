@@ -7,7 +7,7 @@ import * as midi from "./midi.js?v=70";
 import * as fel from "./felucca.js?v=3";
 import { writeMatrix, writeBlock, clearMatrix, blockOf } from "./skiff-write.js?v=5";
 import { summarise, headline } from "./devstate.js?v=1";
-import { BACKUP, decodeList as bkList, readArchive, summariseArchive, u32 } from "./backup.js?v=1";
+import { BACKUP_CMD, captureBackup, summariseArchive } from "./backup.js?v=2";
 import * as audio from "./audio.js?v=67";
 import { knob, sw } from "./knob.js?v=67";
 
@@ -706,45 +706,26 @@ function paintDeviceState() {
   }
 }
 
-// The whole unit, byte for byte: BACKUP_LIST (65) + BACKUP_GET (66), CRC-checked.
+// The whole unit, byte for byte — as a Felucca backup (Skiff's own format, restorable in its editor).
 const backupDev = {
-  backupList: async () => await felReq(BACKUP.LIST, [], 4000, 1) ?? [],
+  backupList: async () => await felReq(BACKUP_CMD.LIST, [], 4000, 1) ?? [],
   getObject: async (id, offset, count) => {
-    const r = await felReq(BACKUP.GET, [id, ...u32(offset), count & 0x7F, (count >> 7) & 0x7F], 4000, 1);
-    if (!r || r.length < 8) return { rc: r?.[1] ?? 4 };
-    const off = (r[2] | (r[3] << 7) | (r[4] << 14) | (r[5] << 21) | (r[6] << 28)) >>> 0;
-    return { rc: r[1], offset: off, data: Uint8Array.from(pack7Bytes(r.slice(8))) };
+    const r = await felReq(BACKUP_CMD.GET, [id, ...Array.from({ length: 5 }, (_, i) => (offset >>> (i * 7)) & (i === 4 ? 15 : 127)),
+                                             count & 0x7F, (count >> 7) & 0x7F], 4000, 1);
+    if (!r) return [id, 4];
+    return r;                                    // (id, rc, offset u32, size lo, size hi, packed bytes)
   },
 };
 
-function pack7Bytes(s) {                       // (Skiff's unpack7, in place)
-  const out = []; let acc = 0, nb = 0;
-  for (const b of s) {
-    acc |= (b & 0x7F) << nb; nb += 7;
-    while (nb >= 8) { out.push(acc & 0xFF); acc >>>= 8; nb -= 8; }
-  }
-  return out;
-}
-
 async function readBackup() {
   if (profile !== "felucca" || !midi.hasAccess() || !midi.findFm1()) return status("no unit on USB to read", "err");
-  if (!fwInfo?.caps) return status("no INFO from the unit yet", "err");
-  status("reading the unit's memory (BACKUP_LIST)…");
+  status("reading the unit (BACKUP_LIST)…");
   try {
-    const list = bkList(await felReq(BACKUP.LIST, [], 4000, 1) ?? []);
-    if (!list.objects.length) return status("the unit listed no objects", "err");
-    status(`${list.objects.length} objects · ${(list.objects.reduce((n, o) => n + o.size, 0) / 1024).toFixed(0)} KB — reading…`);
-    const a = await readArchive(backupDev, {
-      onProgress: (id, at, size) => { if (at === size) status(`object ${id} read (${size} B)`); },
-    });
+    const file = await captureBackup(backupDev, fwInfo?.version ?? "", (done, total) =>
+      status(`backup: ${(done / 1024).toFixed(0)} / ${(total / 1024).toFixed(0)} KB`));
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const json = {
-      app: "timon-backup", version: 1, firmware: fwInfo.version, at: new Date().toISOString(),
-      objects: a.objects.map((o) => ({ id: o.id, size: o.size, crc: o.crc,
-                                       data: btoa(String.fromCharCode(...o.data.slice(0, 1 << 20))) })),
-    };
-    download(`timon-backup-${stamp}.json`, JSON.stringify(json), "application/json");
-    status(`backup read: ${summariseArchive(a)} ✓ (CRCs verified)`, "ok");
+    download(`timon-backup-${stamp}.json`, JSON.stringify(file), "application/json");
+    status(`backup: ${summariseArchive(file)} ✓ — a Felucca backup, restorable in Skiff's editor`, "ok");
   } catch (e) {
     status(String(e.message || e), "err");
   }
