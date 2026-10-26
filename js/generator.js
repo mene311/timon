@@ -278,6 +278,65 @@ export function voiceNotes(note, level, scale, root, vel = 100) {
   }
 }
 
+
+// ---------------------------------------------------------------- DRUM tracks (Timón 2026-10-25)
+// A drum track is not a melody track with different notes: it is four lanes of hits. The tool disables
+// the melody controls on such a track (no CHORDS, no scale, no pitch) and shows the lanes instead.
+// The GM note numbers are Skiff's own lane map (eng_drum.c): a hit on lane k is a note-on for that number.
+export const DRUM_LANES = [
+  { name: "KICK", note: 36, key: "K" },
+  { name: "SNARE", note: 38, key: "S" },
+  { name: "CHH", note: 42, key: "H" },
+  { name: "OHH", note: 46, key: "O" },
+];
+// the rest of the GM kit, behind a "more lanes" reveal (Skiff's full lane map)
+export const DRUM_LANES_MORE = [
+  { name: "CLAP", note: 39, key: "C" }, { name: "TOM", note: 45, key: "T" },
+  { name: "RIM", note: 37, key: "R" }, { name: "BELL", note: 56, key: "B" },
+];
+export const DRUM_LOOP_STEPS = 16;     // a bar; the 64-step pattern repeats it
+
+// one lane's hits over `len` steps: Euclidean pulses, rotated, optionally snapped to a grid
+export function laneHits(pulses, len, rotate = 0, grid = 1) {
+  const mask = euclid(Math.max(0, Math.min(pulses, len)), len);
+  const out = new Array(len).fill(0);
+  for (let i = 0; i < len; i++) {
+    if (!mask[i]) continue;
+    const j = ((i + rotate) % len + len) % len;
+    if (grid > 1 && j % grid !== 0) continue;
+    out[j] = 1;
+  }
+  return out;
+}
+
+// a whole drum pattern: 64 steps of GM notes, the bar repeated. params:
+//   { lanes: [{ pulses, rotate, vel, grid }] four or more, in DRUM_LANES order, len = DRUM_LOOP_STEPS,
+//     accent: extra velocity on the bar's beats (default 15), rate }
+export function generateDrums(params = {}) {
+  const len = params.len || DRUM_LOOP_STEPS;
+  const accent = params.accent ?? 15;
+  const all = [...DRUM_LANES, ...DRUM_LANES_MORE];
+  const lanes = (params.lanes || DRUM_LANES.map((_, i) => ({ pulses: [4, 2, 8, 0][i] ?? 0 })))
+    .map((l, i) => ({ ...l, note: all[i]?.note ?? DRUM_LANES[0].note }));
+  const masks = lanes.map((l) => laneHits(l.pulses ?? 0, len, l.rotate ?? 0, l.grid ?? 1));
+  const steps = Array.from({ length: 64 }, () => ({ rate: params.rate, notes: [] }));
+  for (let i = 0; i < 64; i++) {
+    const j = i % len, beat = j % 4 === 0;
+    for (let k = 0; k < lanes.length; k++) {
+      if (!masks[k][j]) continue;
+      const v = Math.max(1, Math.min(127, (lanes[k].vel ?? 100) + (beat ? accent : 0)));
+      steps[i].notes.push({ note: lanes[k].note, vel: v });
+    }
+  }
+  return steps;
+}
+
+// what a matrix cell shows for a drum track: K S H O, a dot where the lane is silent
+export function drumCell(step) {
+  const hits = new Set((step?.notes || []).map((n) => n.note));
+  return DRUM_LANES.map((l) => (hits.has(l.note) ? l.key : ".")).join("");
+}
+
 export function generate(params) {
   const rng = mulberry32(params.seed >>> 0);
   const lfoRng = mulberry32((params.seed ^ 0x3c6ef372) >>> 0);  // separate stream: switching the wave must not shift the gates
