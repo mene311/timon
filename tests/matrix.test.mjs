@@ -2,7 +2,7 @@
 // a track's steps being the pattern it is on.   node tests/matrix.test.mjs
 import assert from "node:assert/strict";
 import * as fel from "../js/felucca.js";
-import { writeMatrix, clearMatrix, checkWritable } from "../js/skiff-write.js";
+import { writeMatrix, writeBlock, clearMatrix, checkWritable, blockOf } from "../js/skiff-write.js";
 
 const NSTEP = 64, NTRK = 6, NTAG = 16;
 const mkStep = (n, notes, ties = 0) => ({ n, notes: [notes[0] ?? 0, notes[1] ?? 0, 0, 0], time: n ? 0 : 2,
@@ -204,4 +204,57 @@ await tAsync("a NEW that stages (pattern 127) still yields the right id and the 
   assert.equal(dev.raw(0, 8).n, 1);
 });
 
+
+// ---- blocks of 16: T1 1..16, T2 17..32, T3 33..48, T4 49..64 ------------------------------------
+const sixteen = () => Array.from({ length: 16 }, (_, k) => pat([k * 2 % 16, (k * 2 + 4) % 16]));
+
+await tAsync("writeBlock T1: creates patterns 1..16 and points the entries at them", async () => {
+  const dev = fakeDevice();
+  const r = await writeBlock(dev, { track: 0, patterns: sixteen(), nstep: NSTEP, depth: 5 });
+  assert.equal(r.base, 0);
+  assert.deepEqual(r.ids, Array.from({ length: 16 }, (_, k) => k));
+  const st = await dev.list();
+  assert.deepEqual(st.tracks[0].entries.slice(0, 16).map((e) => e.value),
+                   Array.from({ length: 16 }, (_, k) => k + 1));
+  const pool = await dev.pool();
+  assert.equal(pool.patterns.filter((p) => p.len > 0).length, 16);
+});
+
+await tAsync("writeBlock T2: its block is 17..32, not the first free slots", async () => {
+  const dev = fakeDevice();
+  await writeBlock(dev, { track: 0, patterns: sixteen(), nstep: NSTEP });
+  const r = await writeBlock(dev, { track: 1, patterns: sixteen(), nstep: NSTEP });
+  assert.equal(r.base, 16);
+  assert.deepEqual(r.ids.slice(0, 3), [16, 17, 18]);
+  const st = await dev.list();
+  assert.equal(st.tracks[1].entries[0].value, 17);
+  assert.equal(st.tracks[1].entries[15].value, 32);
+  const pool = await dev.pool();
+  assert.equal(pool.patterns.filter((p) => p.len > 0).length, 32);
+});
+
+await tAsync("writeBlock twice: reuses the same patterns (the pool does not grow)", async () => {
+  const dev = fakeDevice();
+  await writeBlock(dev, { track: 0, patterns: sixteen(), nstep: NSTEP });
+  const after1 = (await dev.pool()).patterns.filter((p) => p.len > 0).length;
+  const news1 = dev.calls().new;
+  await writeBlock(dev, { track: 0, patterns: sixteen(), nstep: NSTEP });
+  const after2 = (await dev.pool()).patterns.filter((p) => p.len > 0).length;
+  assert.equal(after2, after1, "the second write reuses the block instead of allocating 16 more");
+  assert.equal(dev.calls().new, news1, "no NEW was needed: every slot already existed");
+});
+
+await tAsync("writeBlock on T5 says there is no block, not 'pool full'", async () => {
+  const dev = fakeDevice();
+  await assert.rejects(() => writeBlock(dev, { track: 4, patterns: sixteen(), nstep: NSTEP }),
+                       /track 5 has no block of 16/);
+});
+
+await tAsync("blockOf: the four blocks, and nothing for T5/T6", () => {
+  assert.deepEqual([0, 1, 2, 3].map((t) => blockOf(t).lo), [1, 17, 33, 49]);
+  assert.equal(blockOf(4), null);
+  assert.equal(blockOf(5), null);
+});
+
 console.log(`\n${n} matrix tests passed`);
+

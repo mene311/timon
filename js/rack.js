@@ -5,7 +5,7 @@ import { generate, generateBank, SCALES, LFO_WAVES, midiName, classicName, eucli
 import { encodeWrite, emptyPattern } from "./pattern.js?v=65";
 import * as midi from "./midi.js?v=70";
 import * as fel from "./felucca.js?v=3";
-import { writeMatrix, clearMatrix } from "./skiff-write.js?v=3";
+import { writeMatrix, writeBlock, clearMatrix, blockOf } from "./skiff-write.js?v=4";
 import * as audio from "./audio.js?v=67";
 import { knob, sw } from "./knob.js?v=67";
 
@@ -718,18 +718,20 @@ async function doFillSkiff() {
   if (busy) return;
   const info = fwInfo ?? await detectFirmware();
   if (!skiffReady()) return doSendAllFelucca();
+  const dest = felTrack();
+  const block = blockOf(dest);
+  if (!block) {
+    status(`T${dest + 1} has no block of 16: the pool is 64 patterns, so only T1-T4 have one (T1 1-16, T2 17-32, T3 33-48, T4 49-64)`, "err");
+    return;
+  }
   busy = true;
   try {
-    const dest = felTrack();
     const nstep = info?.nstep || 64;
-    const plans = bank.map((b) => stepsOf(b, info));
-    const depth = plans[0]?.depth ?? 3;
-    const patterns = plans.map((p) => p.steps);
-    const cells = patterns.map((_, i) => ({ track: dest, entry: i, pattern: i }));
-    status(`writing 16 sequences → track ${dest + 1}…`);
-    const r = await writeMatrix(skiffDevice, { patterns, cells, nstep, depth, authorTrack: dest,
-                                               onStatus: (m) => status(m) });
-    status(`16 sequences written → T${dest + 1} ✓ (${r.ids.length} patterns)`, "ok");
+    const depth = Math.min(4, fel.stepDepth(info?.caps));
+    const patterns = bank.slice(0, 16).map((b) => stepsOf(b, info).steps);
+    status(`writing 16 sequences → T${dest + 1} (patterns ${block.lo}-${block.hi})…`);
+    await writeBlock(skiffDevice, { track: dest, patterns, nstep, depth, onStatus: (m) => status(m) });
+    status(`16 sequences → T${dest + 1} patterns ${block.lo}-${block.hi} ✓`, "ok");
   } catch (e) {
     status(String(e.message || e), "err");
   } finally { busy = false; }
@@ -785,7 +787,7 @@ function paintProfile() {
   const freezeBtn = document.getElementById("freeze");
   if (freezeBtn) freezeBtn.title = "Write the selected sequence into the target track (F)";
   const fillBtn = document.getElementById("fill");
-  if (fillBtn) fillBtn.title = "Write all 16 sequences into projects A–D (slots 1–4 → A tracks 1–4, then B, C, D) — saves flash";
+  if (fillBtn) fillBtn.title = "Write all 16 sequences of this track into its block of the pool (T1 1-16, T2 17-32, T3 33-48, T4 49-64)";
   const clearBtn = document.getElementById("clearall");
   if (clearBtn) clearBtn.title = fwInfo?.caps?.list2
     ? "Clear this entry on the target track (a 2.0 unit: LIST CLEAR; its pattern goes when nothing else names it)"
