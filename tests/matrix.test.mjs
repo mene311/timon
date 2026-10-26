@@ -8,7 +8,7 @@ const NSTEP = 64, NTRK = 6, NTAG = 16;
 const mkStep = (n, notes, ties = 0) => ({ n, notes: [notes[0] ?? 0, notes[1] ?? 0, 0, 0], time: n ? 0 : 2,
   flags: 0, vel: n ? 100 : 0, hit: 0, acc: 0, hi: 0, chance: 100, ratchet: 1, flam: 0, cond: 0, nudge: 0, ties });
 
-function fakeDevice({ song = 0, playing = 0, silentWrites = false } = {}) {
+function fakeDevice({ song = 0, playing = 0, silentWrites = false, setFails = false } = {}) {
   const pool = Array.from({ length: 64 }, () => ({ len: 0, uses: 0, steps: null }));
   const tracks = Array.from({ length: NTRK }, () => ({
     entry: 127, pattern: 127, staged: 127,
@@ -46,6 +46,7 @@ function fakeDevice({ song = 0, playing = 0, silentWrites = false } = {}) {
       }
       if (op === fel.LOP.SET) {
         calls.set++;
+        if (setFails) return { rc: 1, tracks: [] };   // the unit refusing: a pattern not kept
         if (!(value >= 1 && value <= 64) || pool[value - 1].len === 0) return { rc: 1, tracks: [] };
         tracks[tr].entries[en].value = value;
         tracks[tr].staged = en;
@@ -256,5 +257,33 @@ await tAsync("blockOf: the four blocks, and nothing for T5/T6", () => {
   assert.equal(blockOf(5), null);
 });
 
-console.log(`\n${n} matrix tests passed`);
 
+// ---- the regression that produced "SET track 1 entry 0: ... a pattern not kept" -----------------
+await tAsync("the pattern the cells point at survives the scratch entry being cleared", async () => {
+  const dev = fakeDevice();
+  const r = await writeMatrix(dev, { patterns: [pat([0]), pat([4])],
+                                     cells: [{ track: 0, entry: 0, pattern: 0 }, { track: 0, entry: 1, pattern: 1 }],
+                                     nstep: NSTEP, authorTrack: 0, authorEntry: 15 });
+  const pool = await dev.pool();
+  for (const id of r.ids) assert.ok(pool.patterns[id].len > 0, `pattern ${id + 1} must still be kept`);
+  const st = await dev.list();
+  assert.deepEqual([st.tracks[0].entries[0].value, st.tracks[0].entries[1].value], [1, 2]);
+  assert.equal(st.tracks[0].entries[15].value, 0, "and the scratch entry went back to empty");
+});
+
+await tAsync("a cell ON the scratch entry is left alone (no clear after the set)", async () => {
+  const dev = fakeDevice();
+  await writeMatrix(dev, { patterns: [pat([0])], cells: [{ track: 0, entry: 15, pattern: 0 }],
+                           nstep: NSTEP, authorTrack: 0, authorEntry: 15 });
+  const st = await dev.list();
+  assert.equal(st.tracks[0].entries[15].value, 1);
+});
+
+await tAsync("SET gets SET's own words, not the COPY wording", async () => {
+  const dev = fakeDevice({ setFails: true });
+  await assert.rejects(
+    () => writeMatrix(dev, { patterns: [pat([0])], cells: [{ track: 0, entry: 0, pattern: 0 }], nstep: NSTEP }),
+    /not kept/);
+});
+
+console.log(`\n${n} matrix tests passed`);

@@ -16,6 +16,14 @@ export const RC_TEXT = {
   0: "done", 1: "empty: nothing to copy, or no room after", 2: "done, without its automation",
   3: "the unit is playing", 4: "PATTERNS FULL", 5: "failed",
 };
+// rc 1 is one code with several meanings by op; say the one that applies.
+export const RC_BY_OP = {
+  [fel.LOP.SET]: { 1: "the pattern is not kept (an empty pool slot?) - the unit will not point an entry at it",
+                   4: "PATTERNS FULL" },
+  [fel.LOP.NEW]: { 1: "no new pattern could be made", 4: "PATTERNS FULL" },
+  [fel.LOP.CLEAR]: { 1: "the entry was already empty" },
+  [fel.LOP.PLAY]: { 1: "an empty entry cannot be launched" },
+};
 
 export async function readState(dev) {
   const pool = await dev.pool();
@@ -33,9 +41,11 @@ export function checkWritable(state, need) {
 
 // rc 3 is the device saying it is playing: that is worth its own sentence, since it is the one thing the
 // user has to change on the unit itself.
-const refuse = (what, rc) => (rc === 3
-  ? new Error(`${what}: the unit is playing — press PLAY to stop it, then try again`)
-  : new Error(`${what}: ${RC_TEXT[rc] ?? "no reply"}`));
+const refuse = (what, rc, op) => {
+  if (rc === 3) return new Error(`${what}: the unit is playing — press PLAY to stop it, then try again`);
+  const text = (op !== undefined && RC_BY_OP[op]?.[rc]) || RC_TEXT[rc] || "no reply";
+  return new Error(`${what}: ${text}`);
+};
 
 // Write `patterns` into the pool and point `cells` (x-track, entry) at them.
 //   patterns: [[step, ...], ...]   up to 64; each step as the codec's readStep()
@@ -56,7 +66,9 @@ export async function writeMatrix(dev, opts) {
     if (c.pattern < 0 || c.pattern >= patterns.length) throw new Error(`cell names pattern ${c.pattern}, which is not in the plan`);
   }
 
-  // the authoring entry is sacrificed (NEW overwrites it): remember and restore it at the end
+  // The authoring entry is sacrificed (NEW overwrites it). Remember it, and only put it back AFTER the
+  // cells are assigned: LIST CLEAR erases a pattern that nothing else names, so clearing it first would
+  // delete the very pattern the cells are about to point at (rc 1: "a pattern not kept").
   const saved = state.list.tracks[authorTrack]?.entries?.[authorEntry] ?? { value: 0, reps: 1 };
 
   const ids = [];
@@ -90,14 +102,26 @@ export async function writeMatrix(dev, opts) {
     if (k % 8 === 7) onStatus(`pattern ${k + 1}/${patterns.length} written`);
   }
 
-  // (before the cells: NEW overwrote the authoring entry, and a cell may be on that very entry)
-  // put the authoring entry back the way it was (its own pattern, or empty)
-  if (saved.value === 0) await dev.listOp(fel.LOP.CLEAR, authorTrack, authorEntry);
-  else await dev.listOp(fel.LOP.SET, authorTrack, authorEntry, saved.value);
+  // a cell may sit on the authoring entry: then the cell's SET is the restore
+  const scratchIsCell = cells.some((c) => c.track === authorTrack && c.entry === authorEntry);
+  if (saved.value !== 0 && !scratchIsCell) {
+    const r = await dev.listOp(fel.LOP.SET, authorTrack, authorEntry, saved.value);
+    if (!r || r.rc !== 0) throw refuse(`restoring T${authorTrack + 1} entry ${authorEntry + 1}`, r?.rc, fel.LOP.SET);
+  }
 
+  const poolNow = await dev.pool();        // (the snapshot taken before the NEWs is stale)
   for (const c of cells) {
+    // before asking: is the pattern we are about to name actually kept? (the unit answers rc 1 if not)
+    const kept = (poolNow.patterns[ids[c.pattern]]?.len ?? 0) > 0;
+    if (!kept)
+      throw new Error(`pattern ${ids[c.pattern] + 1} is not in the pool any more - nothing to point T${c.track + 1} entry ${c.entry + 1} at`);
     const r = await dev.listOp(fel.LOP.SET, c.track, c.entry, ids[c.pattern] + 1);
-    if (!r || r.rc !== 0) throw refuse(`SET track ${c.track + 1} entry ${c.entry}`, r?.rc);
+    if (!r || r.rc !== 0) throw refuse(`T${c.track + 1} entry ${c.entry + 1} -> pattern ${ids[c.pattern] + 1}`, r?.rc, fel.LOP.SET);
+  }
+
+  if (saved.value === 0 && !scratchIsCell) {
+    const r = await dev.listOp(fel.LOP.CLEAR, authorTrack, authorEntry);   // safe now: the cells name them
+    if (!r || r.rc > 1) throw refuse(`clearing the scratch entry T${authorTrack + 1}/${authorEntry + 1}`, r?.rc, fel.LOP.CLEAR);
   }
 
   // read it all back: every cell must name the pattern the plan says
@@ -144,12 +168,12 @@ export async function writeBlock(dev, opts) {
     let r;
     if (exists) {
       r = await dev.listOp(fel.LOP.SET, track, k, id + 1);          // point the entry at the pattern we own
-      if (!r || r.rc !== 0) throw refuse(`T${track + 1} entry ${k + 1} -> pattern ${id + 1}`, r?.rc);
+      if (!r || r.rc !== 0) throw refuse(`T${track + 1} entry ${k + 1} -> pattern ${id + 1}`, r?.rc, fel.LOP.SET);
     } else {
       const before = (await dev.pool()).free;
       if (before < 1) throw new Error("the pool is full: clear unused patterns first (POOL > CLEAR UNUSED)");
       r = await dev.listOp(fel.LOP.NEW, track, k);
-      if (!r || r.rc !== 0) throw refuse(`creating pattern ${id + 1}`, r?.rc);
+      if (!r || r.rc !== 0) throw refuse(`creating pattern ${id + 1}`, r?.rc, fel.LOP.NEW);
       const got = (r.tracks[track]?.entries?.[k]?.value ?? 0) - 1;
       if (got !== id)
         throw new Error(`the unit handed out pattern ${got + 1} where the block needs ${id + 1}: ` +
@@ -157,7 +181,7 @@ export async function writeBlock(dev, opts) {
     }
     // the track must be ON the pattern before TRACK_STEP writes into it
     const on = await dev.listOp(fel.LOP.PLAY, track, k);
-    if (!on || on.rc !== 0) throw refuse(`launching T${track + 1} entry ${k + 1}`, on?.rc);
+    if (!on || on.rc !== 0) throw refuse(`launching T${track + 1} entry ${k + 1}`, on?.rc, fel.LOP.PLAY);
     if (on.tracks[track]?.pattern !== id)
       throw new Error(`T${track + 1} is on pattern ${on.tracks[track]?.pattern}, not ${id}`);
 

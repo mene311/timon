@@ -5,7 +5,7 @@ import { generate, generateBank, SCALES, LFO_WAVES, midiName, classicName, eucli
 import { encodeWrite, emptyPattern } from "./pattern.js?v=65";
 import * as midi from "./midi.js?v=70";
 import * as fel from "./felucca.js?v=3";
-import { writeMatrix, writeBlock, clearMatrix, blockOf } from "./skiff-write.js?v=4";
+import { writeMatrix, writeBlock, clearMatrix, blockOf } from "./skiff-write.js?v=5";
 import * as audio from "./audio.js?v=67";
 import { knob, sw } from "./knob.js?v=67";
 
