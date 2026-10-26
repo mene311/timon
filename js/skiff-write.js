@@ -39,6 +39,30 @@ export function checkWritable(state, need) {
   if (state.list.tracks.length < 1) throw new Error("the unit reported no tracks");
 }
 
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Put a track ON an entry's pattern before writing into it, and prove it: LIST PLAY is accepted even
+// when the unit only STAGES the entry (it then applies at its launch point), so ask again, re-poll, and
+// only give up when the unit keeps reporting another pattern — with no step written in that case.
+async function bringTrack(dev, track, entry, id, { tries = 3, polls = 6, ms = 120 } = {}) {
+  let last = null;
+  for (let k = 0; k < tries; k++) {
+    const r = await dev.listOp(fel.LOP.PLAY, track, entry);
+    if (!r || r.rc !== 0) throw refuse(`launching T${track + 1} entry ${entry + 1}`, r?.rc, fel.LOP.PLAY);
+    let st = r;
+    for (let i = 0; i < polls; i++) {
+      last = st.tracks?.[track] ?? last;
+      if (last?.pattern === id) return st;
+      if (ms) await wait(ms);
+      st = await dev.list();
+    }
+    if (ms) await wait(ms * 2);
+  }
+  throw new Error(`the unit will not bring T${track + 1} onto pattern ${id + 1} (it stays on ` +
+    `${last?.pattern === 127 || last?.pattern == null ? "no pattern" : `pattern ${last.pattern + 1}`}` +
+    `, entry ${entry + 1} staged): stop the unit (or leave song mode) and try again — nothing was written`);
+}
+
 // rc 3 is the device saying it is playing: that is worth its own sentence, since it is the one thing the
 // user has to change on the unit itself.
 const refuse = (what, rc, op) => {
@@ -83,12 +107,8 @@ export async function writeMatrix(dev, opts) {
     if (!(id >= 0 && id <= 63))
       throw new Error(`the unit put nothing in the entry (it answered ${r.tracks[authorTrack]?.entries?.[authorEntry]?.value}) — the pool may be full`);
     ids.push(id);
-    if (r.tracks[authorTrack]?.pattern !== id) {
-      const pl = await dev.listOp(fel.LOP.PLAY, authorTrack, authorEntry);   // stopped: it comes in at once
-      if (!pl || pl.rc !== 0) throw refuse("bringing the track onto the new pattern", pl?.rc);
-      if (pl.tracks[authorTrack]?.pattern !== id)
-        throw new Error(`the track is on pattern ${pl.tracks[authorTrack]?.pattern}, not the new ${id}: the unit will not take the steps`);
-    }
+    if (r.tracks[authorTrack]?.pattern !== id)
+      await bringTrack(dev, authorTrack, authorEntry, id);
 
     for (let i = 0; i < nstep; i++) {
       const want = patterns[k][i];
@@ -180,10 +200,7 @@ export async function writeBlock(dev, opts) {
                         `patterns ${block.lo}-${block.hi} are not free (clear the pool first)`);
     }
     // the track must be ON the pattern before TRACK_STEP writes into it
-    const on = await dev.listOp(fel.LOP.PLAY, track, k);
-    if (!on || on.rc !== 0) throw refuse(`launching T${track + 1} entry ${k + 1}`, on?.rc, fel.LOP.PLAY);
-    if (on.tracks[track]?.pattern !== id)
-      throw new Error(`T${track + 1} is on pattern ${on.tracks[track]?.pattern}, not ${id}`);
+    await bringTrack(dev, track, k, id);
 
     for (let i = 0; i < nstep; i++) {
       const want = patterns[k][i];

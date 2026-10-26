@@ -286,4 +286,39 @@ await tAsync("SET gets SET's own words, not the COPY wording", async () => {
     /not kept/);
 });
 
+
+// ---- a unit that only STAGES a launch -----------------------------------------------------------
+function stagingDevice({ applyOnPlay }) {
+  const dev = fakeDevice();
+  let plays = 0;
+  const realListOp = dev.listOp;
+  dev.listOp = async (op, tr, en, v) => {
+    if (op !== fel.LOP.PLAY) return realListOp(op, tr, en, v);
+    plays++;
+    if (plays < applyOnPlay) {                        // accepted, but the entry is only staged
+      const st = await dev.list();
+      return { ...st, tracks: st.tracks.map((t, i) => (i === tr ? { ...t, staged: en } : t)) };
+    }
+    return realListOp(op, tr, en, v);
+  };
+  return dev;
+}
+
+await tAsync("a staged launch is retried until the track is really on the pattern", async () => {
+  const dev = stagingDevice({ applyOnPlay: 2 });
+  const r = await writeMatrix(dev, { patterns: [pat([0, 8])], cells: [{ track: 0, entry: 0, pattern: 0 }],
+                                     nstep: NSTEP, authorTrack: 0, authorEntry: 15 });
+  assert.deepEqual(r.ids, [0]);
+  assert.equal(dev.raw(0, 0).n, 1, "the steps landed once the launch took");
+});
+
+await tAsync("a unit that never launches is refused in words, and nothing is written", async () => {
+  const dev = stagingDevice({ applyOnPlay: 99 });
+  await assert.rejects(
+    () => writeMatrix(dev, { patterns: [pat([0])], cells: [{ track: 0, entry: 0, pattern: 0 }], nstep: NSTEP }),
+    /will not bring T1 onto pattern 1 .*nothing was written/);
+  assert.equal(dev.calls().setStep, 0, "no step was written to the wrong pattern");
+});
+
 console.log(`\n${n} matrix tests passed`);
+
