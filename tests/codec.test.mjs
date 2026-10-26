@@ -153,4 +153,37 @@ t("LIST SET values: a kept pattern is 1..64, a REST is 65, empty is 0", () => {
   assert.deepEqual(fel.LOP, { SET: 1, COPY: 2, PLAY: 3, CLEAR: 4, REPS: 5, SONG: 6, NEW: 7, COPY_PLUS: 8 });
 });
 
+
+t("POOL decode: lengths, uses, free count", () => {
+  const a = [0, 0];
+  for (let i = 0; i < 64; i++) a.push(i < 3 ? 64 : 0, i === 0 ? 2 : 0);
+  const p = fel.decodePool(a);
+  assert.equal(p.patterns.length, 64);
+  assert.equal(p.patterns[0].len, 64);
+  assert.equal(p.patterns[0].uses, 2);
+  assert.equal(p.patterns[3].len, 0);
+  assert.equal(p.free, 61);
+});
+
+t("LIST decode: song, per-track state, entries with REPS and CHAIN", () => {
+  const a = [0, 0, 1];
+  for (let tr = 0; tr < 6; tr++) {
+    a.push(tr === 0 ? 0 : 127, 127, tr === 0 ? 5 : 127);
+    for (let e = 0; e < 16; e++) {
+      if (tr === 0 && e === 0) a.push(5, 3);          // pattern 5, 4 REPS
+      else if (tr === 0 && e === 1) a.push(6, 0);     // CHAIN
+      else a.push(0, 0);                              // empty
+    }
+  }
+  const l = fel.decodeList(a);
+  assert.equal(l.song, 1);
+  assert.equal(l.tracks.length, 6);
+  assert.equal(l.tracks[0].pattern, 5);
+  assert.equal(l.tracks[0].entries[0].value, 5);
+  assert.equal(l.tracks[0].entries[0].reps, 4);
+  assert.equal(l.tracks[0].entries[1].chained, true);
+  assert.equal(l.tracks[1].entry, 127);
+  assert.equal(l.tracks[1].entries[0].value, 0);
+});
+
 console.log(`\n${n} codec tests passed`);

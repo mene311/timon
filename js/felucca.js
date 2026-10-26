@@ -208,6 +208,34 @@ export function pulseSteps(pattern, nstep = 64, velDefault = 100, noteLen = 1) {
   return out;
 }
 
+// POOL (78) reply: op, rc, then for each of the 64 patterns its LEN (0: empty) and how many use it.
+export function decodePool(args) {
+  const rc = args[1] ?? 0, patterns = [];
+  for (let i = 0; i < 64; i++) patterns.push({ len: args[2 + i * 2] ?? 0, uses: args[3 + i * 2] ?? 0 });
+  return { op: args[0] ?? 0, rc, patterns, free: patterns.filter((p) => p.len === 0).length };
+}
+
+// LIST (79) reply: op, rc, SONG, then per track: the entry it is on (127 none), the entry staged
+// (127 none), the pattern it is on (0..63, 127 none), then its 16 entries: value (1..64 kept,
+// 65 REST, 0 empty) and REPS - 1 (0 on a CHAIN).
+export const LIST_TRACK_BYTES = 3 + 16 * 2;
+export function decodeList(args) {
+  const op = args[0] ?? 0, rc = args[1] ?? 0, song = args[2] ?? 0, tracks = [];
+  for (let at = 3; at + LIST_TRACK_BYTES <= args.length; at += LIST_TRACK_BYTES) {
+    const entries = [];
+    for (let e = 0; e < 16; e++)
+      entries.push({ value: args[at + 3 + e * 2], reps: args[at + 4 + e * 2] + 1, chained: args[at + 4 + e * 2] === 0 && args[at + 3 + e * 2] !== 0 });
+    tracks.push({ entry: args[at], staged: args[at + 1], pattern: args[at + 2], entries });
+  }
+  return { op, rc, song, tracks };
+}
+
+// LIST's reply codes, in words (the app shows these instead of numbers).
+export const LIST_RC = {
+  0: "done", 1: "empty entry or nothing to copy", 2: "done, without its automation",
+  3: "the unit is playing", 4: "PATTERNS FULL", 5: "failed",
+};
+
 // A REST step (what clearing a track writes).
 export function restStep() {
   return { n: 0, notes: [0, 0, 0, 0], time: ST.REST, flags: 0, vel: 0, hit: 0, acc: 0, hi: 0, chance: 100 };
