@@ -64,9 +64,19 @@ export async function writeMatrix(dev, opts) {
     onStatus(`pattern ${k + 1}/${patterns.length}: allocating a pool slot…`);
     const r = await dev.listOp(fel.LOP.NEW, authorTrack, authorEntry);
     if (!r || r.rc !== 0) throw refuse("allocating a pool slot", r?.rc);
-    const id = r.tracks[authorTrack].pattern;
-    if (id < 0 || id > 63) throw new Error(`the unit reported pattern ${id}, which is outside the pool`);
+    // The pattern's number is the entry's value - 1 (1..64). The track's own "pattern it is on" can
+    // still read 127 (PAT_NONE) right after a NEW: an entry is STAGED first and the track comes onto
+    // it when it launches. Never take 127 as an id; take the entry, then put the track onto it.
+    const id = (r.tracks[authorTrack]?.entries?.[authorEntry]?.value ?? 0) - 1;
+    if (!(id >= 0 && id <= 63))
+      throw new Error(`the unit put nothing in the entry (it answered ${r.tracks[authorTrack]?.entries?.[authorEntry]?.value}) — the pool may be full`);
     ids.push(id);
+    if (r.tracks[authorTrack]?.pattern !== id) {
+      const pl = await dev.listOp(fel.LOP.PLAY, authorTrack, authorEntry);   // stopped: it comes in at once
+      if (!pl || pl.rc !== 0) throw refuse("bringing the track onto the new pattern", pl?.rc);
+      if (pl.tracks[authorTrack]?.pattern !== id)
+        throw new Error(`the track is on pattern ${pl.tracks[authorTrack]?.pattern}, not the new ${id}: the unit will not take the steps`);
+    }
 
     for (let i = 0; i < nstep; i++) {
       const want = patterns[k][i];

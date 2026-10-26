@@ -11,12 +11,12 @@ const mkStep = (n, notes, ties = 0) => ({ n, notes: [notes[0] ?? 0, notes[1] ?? 
 function fakeDevice({ song = 0, playing = 0, silentWrites = false } = {}) {
   const pool = Array.from({ length: 64 }, () => ({ len: 0, uses: 0, steps: null }));
   const tracks = Array.from({ length: NTRK }, () => ({
-    entry: 127, pattern: 127,
+    entry: 127, pattern: 127, staged: 127,
     entries: Array.from({ length: NTAG }, () => ({ value: 0, reps: 1 })),
   }));
-  let calls = { setStep: 0, new: 0, set: 0, clear: 0 };
+  let calls = { setStep: 0, new: 0, set: 0, clear: 0, play: 0 };
   const listState = () => ({ op: 0, rc: 0, song, tracks: tracks.map((t) => ({
-    entry: t.entry, staged: 127, pattern: t.pattern,
+    entry: t.entry, staged: t.staged ?? 127, pattern: t.pattern,
     entries: t.entries.map((e) => ({ value: e.value, reps: e.reps, chained: false })),
   })) });
   const firstFree = () => pool.findIndex((p) => p.len === 0);
@@ -34,14 +34,21 @@ function fakeDevice({ song = 0, playing = 0, silentWrites = false } = {}) {
         if (id < 0) return { rc: 4, tracks: [] };
         pool[id] = { len: NSTEP, uses: 0, steps: Array.from({ length: NSTEP }, () => mkStep(0, [])) };
         tracks[tr].entries[en].value = id + 1;
-        tracks[tr].entry = en; tracks[tr].pattern = id;
+        tracks[tr].staged = en;                         // STAGED, as the firmware does: pattern stays as it was
+        return listState();
+      }
+      if (op === fel.LOP.PLAY) {
+        calls.play = (calls.play ?? 0) + 1;
+        const v = tracks[tr].entries[en].value;
+        if (!v) return { rc: 1, tracks: [] };
+        tracks[tr].entry = en; tracks[tr].pattern = v - 1; tracks[tr].staged = 127;
         return listState();
       }
       if (op === fel.LOP.SET) {
         calls.set++;
         if (!(value >= 1 && value <= 64) || pool[value - 1].len === 0) return { rc: 1, tracks: [] };
         tracks[tr].entries[en].value = value;
-        tracks[tr].entry = en; tracks[tr].pattern = value - 1;
+        tracks[tr].staged = en;
         return listState();
       }
       if (op === fel.LOP.CLEAR) {
@@ -184,6 +191,17 @@ t("checkWritable: room and tracks, never the song byte", () => {
   assert.doesNotThrow(() => checkWritable({ list: { song: 1, tracks: [1] }, pool: { free: 9 } }, 1));
   assert.throws(() => checkWritable({ list: { song: 0, tracks: [1] }, pool: { free: 0 } }, 1), /pool has 0 free/);
   assert.doesNotThrow(() => checkWritable({ list: { song: 0, tracks: [1] }, pool: { free: 9 } }, 1));
+});
+
+
+
+await tAsync("a NEW that stages (pattern 127) still yields the right id and the steps land", async () => {
+  const dev = fakeDevice();
+  const r = await writeMatrix(dev, { patterns: [pat([0, 8])], cells: [{ track: 2, entry: 4, pattern: 0 }], nstep: NSTEP, authorTrack: 2 });
+  assert.deepEqual(r.ids, [0]);
+  assert.ok(dev.calls().play >= 1, "the track was brought onto the new pattern before writing");
+  assert.equal(dev.raw(0, 0).n, 1, "the pattern is not blank: its steps were written");
+  assert.equal(dev.raw(0, 8).n, 1);
 });
 
 console.log(`\n${n} matrix tests passed`);
