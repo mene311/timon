@@ -1,4 +1,14 @@
-# FM-1 Pulses · Felucca
+# Timón
+
+A companion app for the **M-VAVE FM-1** — browser pattern generator and rack over Web MIDI
+(vanilla JS, no build step, no dependencies).
+
+Timón is the **Skiff-target** line of [FM-1 Pulses](https://github.com/mene311/fm1-pulses):
+64 patterns in the pool, 6 tracks x 16 entries, and Skiff's editor protocol over USB.
+
+---
+
+## FM-1 Pulses · Felucca (the fork this grew from)
 
 A **Felucca-native fork** of [FM-1 Pulses](https://github.com/mene311/fm1-pulses).
 Same browser generator (vanilla JS + Web MIDI, no build step, no dependencies),

@@ -1,7 +1,7 @@
 {
-  "name": "FM-1 Pulses",
-  "short_name": "Pulses",
-  "description": "Generative MIDI sequencer for the M-VAVE FM-1",
+  "name": "Timón",
+  "short_name": "Timón",
+  "description": "Timón — companion pattern generator for the M-VAVE FM-1",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
