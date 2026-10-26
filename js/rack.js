@@ -4,7 +4,8 @@
 import { generate, generateBank, SCALES, LFO_WAVES, midiName, classicName, euclid } from "./generator.js?v=71";
 import { encodeWrite, emptyPattern } from "./pattern.js?v=65";
 import * as midi from "./midi.js?v=70";
-import * as fel from "./felucca.js?v=2";
+import * as fel from "./felucca.js?v=3";
+import { writeMatrix, clearMatrix } from "./skiff-write.js?v=1";
 import * as audio from "./audio.js?v=67";
 import { knob, sw } from "./knob.js?v=67";
 
@@ -25,7 +26,11 @@ const DEFAULT = {
 };
 const state = { ...DEFAULT };
 let bank = [];
-let selected = 0;
+let selected = 0;               // the entry (0..15) inside the current track's bank
+let track = 0;                  // the track we are editing: 6 of them on Skiff, independent of the entry
+const NTRK_DEFAULT = 6;
+// a track's own knobs/bank cursor, restored when the track is selected
+const TRACK_CURSOR_KEY = "fm1p-felucca.trackcursor";   // { t: entry }
 let busy = false;
 let editStep = -1;
 const locks = new Map();   // "slot:step" -> [{ note, vel }]
@@ -229,7 +234,7 @@ function renderBuffer() {
   fitSteps();
   renderScope();
   renderRoll();
-  if (presetShownTrack !== selected % 4) renderPresets();   // the bank follows the track
+  if (presetShownTrack !== track) renderPresets();   // the bank follows the track
 }
 
 // Size every step dot to min(cell width, row height) so the circles can never
@@ -655,17 +660,106 @@ async function syncDeviceTempo(data = null, retries = 2) {
   }
 }
 
+// --------------------------------------------------------------------------- //
+// Skiff 2.0: the pool + the entries (POOL 78 / LIST 79 / TRACK_STEP 30)
+// --------------------------------------------------------------------------- //
+const skiffDevice = {
+  pool: async () => fel.decodePool(await felReq(fel.CMD.POOL, []) ?? []),
+  list: async () => fel.decodeList(await felReq(fel.CMD.LIST, []) ?? []),
+  listOp: async (op, tr, en, v) =>
+    fel.decodeList(await felReq(fel.CMD.LIST, v === undefined ? [op, tr, en] : [op, tr, en, v]) ?? []),
+  poolOp: async (op, id) =>
+    fel.decodePool(await felReq(fel.CMD.POOL, id === undefined ? [op] : [op, id]) ?? []),
+  getStep: async (tr, i) => {
+    const r = await felReq(fel.CMD.TRACK_STEP, [tr, i]);
+    return r ? fel.readStep(r) : null;
+  },
+  setStep: async (tr, i, st, depth = 3) => {
+    const r = await felReq(fel.CMD.TRACK_STEP, [tr, i, ...fel.stepBytes(st, depth)]);
+    return r ? fel.readStep(r) : null;
+  },
+};
+
+// The steps of one generated sequence, as the unit takes them. Depth 4 at most: the per-note ties
+// (2.0) are not modelled by the generator yet, so a write must not claim to set them.
+function stepsOf(pattern, info) {
+  const nstep = info?.nstep || 64;
+  const depth = Math.min(4, fel.stepDepth(info?.caps));
+  return { steps: fel.pulseSteps(pattern, nstep, Math.round(state.velocity ?? 100), Math.max(1, state.noteLen ?? 1)), depth };
+}
+
+function skiffReady() {
+  if (!fwInfo) return false;
+  if (!fwInfo.caps?.list2) return false;               // NEW/COPY+: the entry model only exists there
+  return true;
+}
+
+async function doFreezeSkiff(slotIndex) {
+  if (busy || !bank[slotIndex]) return;
+  const info = fwInfo ?? await detectFirmware();
+  if (!skiffReady()) return doFreezeFelucca(slotIndex);
+  busy = true;
+  try {
+    const dest = felTrack();
+    const { steps, depth } = stepsOf(bank[slotIndex], info);
+    status(`freezing sequence ${slotIndex + 1} → track ${dest + 1}, entry ${selected + 1}…`);
+    await writeMatrix(skiffDevice, {
+      patterns: [steps], cells: [{ track: dest, entry: selected, pattern: 0 }], nstep: info?.nstep || 64, depth,
+      authorTrack: dest, authorEntry: 15 - 0,
+      onStatus: (m) => status(m),
+    });
+    status(`sequence ${slotIndex + 1} frozen → T${dest + 1} entry ${selected + 1} ✓`, "ok");
+  } catch (e) {
+    status(String(e.message || e), "err");
+  } finally { busy = false; }
+}
+
+async function doFillSkiff() {
+  if (busy) return;
+  const info = fwInfo ?? await detectFirmware();
+  if (!skiffReady()) return doSendAllFelucca();
+  busy = true;
+  try {
+    const dest = felTrack();
+    const nstep = info?.nstep || 64;
+    const plans = bank.map((b) => stepsOf(b, info));
+    const depth = plans[0]?.depth ?? 3;
+    const patterns = plans.map((p) => p.steps);
+    const cells = patterns.map((_, i) => ({ track: dest, entry: i, pattern: i }));
+    status(`writing 16 sequences → track ${dest + 1}…`);
+    const r = await writeMatrix(skiffDevice, { patterns, cells, nstep, depth, authorTrack: dest,
+                                               onStatus: (m) => status(m) });
+    status(`16 sequences written → T${dest + 1} ✓ (${r.ids.length} patterns)`, "ok");
+  } catch (e) {
+    status(String(e.message || e), "err");
+  } finally { busy = false; }
+}
+
+async function doClearSkiff() {
+  if (busy) return;
+  const info = fwInfo ?? await detectFirmware();
+  if (!skiffReady()) return doClearTrackFelucca();
+  busy = true;
+  try {
+    const dest = felTrack();
+    await clearMatrix(skiffDevice, { cells: [{ track: dest, entry: selected }] });
+    status(`cleared T${dest + 1} entry ${selected + 1} ✓`, "ok");
+  } catch (e) {
+    status(String(e.message || e), "err");
+  } finally { busy = false; }
+}
+
 async function doFreeze(slotIndex) {
   if (!bank[slotIndex]) return;
-  return doFreezeFelucca(slotIndex);
+  return fwInfo && fwInfo.caps?.list2 ? doFreezeSkiff(slotIndex) : doFreezeFelucca(slotIndex);
 }
 
 async function doSendAll() {
-  return doSendAllFelucca();
+  return fwInfo && fwInfo.caps?.list2 ? doFillSkiff() : doSendAllFelucca();
 }
 
 async function doClearAll() {
-  return doClearTrackFelucca();
+  return fwInfo && fwInfo.caps?.list2 ? doClearSkiff() : doClearTrackFelucca();
 }
 
 // --------------------------------------------------------------------------- //
@@ -673,7 +767,7 @@ async function doClearAll() {
 // --------------------------------------------------------------------------- //
 let profile = null;      // null unknown · "felucca" · "baudgirl"
 let fwInfo = null;       // the INFO reply while the Felucca profile is on
-const felTrack = () => Math.max(0, Math.min(3, Number(document.getElementById("ftrack")?.value ?? 0) || 0));
+const felTrack = () => Math.max(0, Math.min(NTRK_DEFAULT - 1, Number(document.getElementById("ftrack")?.value ?? track) || 0));
 // The destination follows the selected cell's track unless the user picked one.
 function syncDestTrack() {
   const ft = document.getElementById("ftrack");
@@ -693,7 +787,9 @@ function paintProfile() {
   const fillBtn = document.getElementById("fill");
   if (fillBtn) fillBtn.title = "Write all 16 sequences into projects A–D (slots 1–4 → A tracks 1–4, then B, C, D) — saves flash";
   const clearBtn = document.getElementById("clearall");
-  if (clearBtn) clearBtn.title = "Clear the target track's 64 steps on the FM-1";
+  if (clearBtn) clearBtn.title = fwInfo?.caps?.list2
+    ? "Clear this entry on the target track (a 2.0 unit: LIST CLEAR; its pattern goes when nothing else names it)"
+    : "Clear the target track's 64 steps on the FM-1";
 }
 
 // INFO answers on Felucca (and its forks); the Baud Girl firmwares do not
@@ -1045,8 +1141,10 @@ async function liveLoop(token) {
       // slot: the selected sequence on its track's channel. project: the
       // project's four sequences at once, sequence p*4+t on channel t+1. The
       // selected sequence is the conductor (timing); the others follow it 1:1.
+      // project: the same entry on every track, each on its own channel — every track keeps its
+      // own knobs, so its bank is re-derived here from what the track stored.
       const parts = state.playMode === "project"
-        ? [0, 1, 2, 3].map((t) => ({ p: bank[Math.floor(selected / 4) * 4 + t], ch: t + 1 }))
+        ? tracksWithBanks().map(({ t, b }) => ({ p: b[selected], ch: t + 1 })).filter((x) => x.p)
         : [{ p, ch: felTrack() + 1 }];                    // the dest track, live
       // the row each part is on (a part may have its own length)
       for (const part of parts) part.li = part.p?.length ? i % part.p.length : 0;
@@ -1355,6 +1453,7 @@ function download(name, data, type) {
 }
 
 function exportState() {
+  saveTrackState();                                   // what is on screen is this track's
   const data = {
     app: "fm1-pulses",
     version: STATE_VERSION,
@@ -1362,6 +1461,9 @@ function exportState() {
     params: { ...state },
     locks: Object.fromEntries(locks),
     selected,
+    track,
+    tracks: readTrackStates(),                        // the six tracks' knobs (T1..T6)
+    cursor: readTrackCursor(),                        // and the entry each one was on
   };
   download(`fm1p-${state.seed >>> 0}.json`, JSON.stringify(data, null, 2), "application/json");
   status(`exported seed ${state.seed >>> 0} ✓`);
@@ -1371,7 +1473,15 @@ async function importState(file) {
   try {
     const d = JSON.parse(await file.text());
     if (!d || d.app !== "fm1-pulses") throw new Error("not an FM-1 Pulses file");
+    if (d.tracks && typeof d.tracks === "object") {
+      try { localStorage.setItem(TRACK_STATE_KEY, JSON.stringify(d.tracks)); } catch { /* blocked */ }
+      if (d.cursor) { try { localStorage.setItem(TRACK_CURSOR_KEY, JSON.stringify(d.cursor)); } catch { /* blocked */ } }
+    }
+    if (typeof d.track === "number") { track = Math.max(0, Math.min(NTRK_DEFAULT - 1, d.track)); }
+    const ft = document.getElementById("ftrack");
+    if (ft) ft.value = String(track);
     applyStateData(d);
+    paintTrackState();
     status(`imported seed ${state.seed >>> 0} ✓`);
   } catch (e) {
     status("import failed: " + (e.message || e), "err");
@@ -1392,7 +1502,7 @@ const LEGACY_KEY = "fm1p.presets";            // the pulses bank: seeds every tr
 let presetArm = null;   // "save" | "load" | null
 let presetShownTrack = -1;
 
-const activeTrack = () => selected % 4;        // sequence = project * 4 + track
+const activeTrack = () => track;                // a track of its own: the entry does not pick it
 
 // --------------------------------------------------------------------------- //
 // Per-track knob state (localStorage). The four tracks are different parts, so
@@ -1443,8 +1553,48 @@ function restoreTrackState(t) {
   return true;
 }
 
-// Move the cursor (a matrix tap or ←/→): bank the knobs on the track we leave,
-// load the ones of the track we land on.
+// Every track's bank, derived from the knobs it stored (the bank comes from the state, so this is
+// how another track's sequences are known without keeping six banks in memory).
+function tracksWithBanks() {
+  const stored = readTrackStates();
+  const out = [];
+  for (let t = 0; t < NTRK_DEFAULT; t++) {
+    const d = t === track ? { ...state } : stored[t];
+    if (!d) { out.push({ t, b: t === track ? bank : [] }); continue; }
+    out.push({ t, b: t === track ? bank : generateBank({ ...DEFAULT, ...d }, d.drift ?? state.drift) });
+  }
+  return out;
+}
+
+function readTrackCursor() {
+  try { return JSON.parse(localStorage.getItem(TRACK_CURSOR_KEY)) || {}; } catch { return {}; }
+}
+
+// Switch the track we are editing: the entry stays where it is, the bank, the knobs and the roll
+// follow the track. That is the whole point of a per-track bank: T1's 16 sequences and T6's 16 are
+// different sequences, not four projects of the same one.
+function switchTrack(t) {
+  t = Math.max(0, Math.min(NTRK_DEFAULT - 1, Math.round(t) || 0));
+  if (t === track) { paintTrackState(); return; }
+  saveTrackState();
+  const cur = readTrackCursor();
+  cur[track] = selected;
+  try { localStorage.setItem(TRACK_CURSOR_KEY, JSON.stringify(cur)); } catch { /* blocked */ }
+  track = t;
+  const saved = cur[track];
+  if (typeof saved === "number") selected = Math.max(0, Math.min(SLOTS - 1, saved));
+  restoreTrackState(track);                 // knobs (or what is on screen if the track never stored any)
+  bank = generateBank(state, state.drift);  // the bank is the track's own, re-derived from its knobs
+  applyLocks();
+  const ft = document.getElementById("ftrack");
+  if (ft) ft.value = String(track);
+  renderBank(); renderBuffer(); renderRoll();
+  followTrack(track + 1);
+  status(`track ${track + 1} of ${NTRK_DEFAULT} · ${bank.filter(Boolean).length} sequences`);
+  paintTrackState();
+}
+
+// Move the cursor inside the current track's bank (a matrix tap or ←/→).
 function selectSlot(next) {
   next = Math.max(0, Math.min(SLOTS - 1, Math.round(next) || 0));
   if (next === selected) { renderBank(); renderBuffer(); return; }
@@ -1473,18 +1623,19 @@ function readBanks() {
   try { b = JSON.parse(localStorage.getItem(PRESET_KEY)); } catch { /* fresh */ }
   if (b && typeof b === "object" && !Array.isArray(b)) {
     const out = {};
-    for (let t = 0; t < 4; t++) out[t] = Array.isArray(b[t]) ? b[t].slice(0, PRESET_N) : Array(PRESET_N).fill(null);
+    for (let t = 0; t < NTRK_DEFAULT; t++)       // six tracks: a 1.4-era store has four, the rest start empty
+      out[t] = Array.isArray(b[t]) ? b[t].slice(0, PRESET_N) : Array(PRESET_N).fill(null);
     return out;
   }
   let legacy = null;
   try { legacy = JSON.parse(localStorage.getItem(LEGACY_KEY)); } catch { /* fresh */ }
   const seed = Array.isArray(legacy) ? legacy.slice(0, PRESET_N) : Array(PRESET_N).fill(null);
   const fresh = {};
-  for (let t = 0; t < 4; t++) fresh[t] = seed.map((p) => (p ? { ...p } : null));
+  for (let t = 0; t < NTRK_DEFAULT; t++) fresh[t] = seed.map((p) => (p ? { ...p } : null));
   return fresh;
 }
 
-function readPresets() { return readBanks()[activeTrack()]; }
+function readPresets() { return readBanks()[activeTrack()] ?? Array(PRESET_N).fill(null); }
 
 function writePresets(arr) {
   const b = readBanks();
@@ -1522,16 +1673,11 @@ function savePreset(i) {
 
 function recallPreset(i) {
   const d = readPresets()[i];
-  if (!d) { status(`preset ${i + 1} is empty (track ${activeTrack() + 1})`, "err"); return; }
-  const track = activeTrack();
-  applyStateData(d);
-  const t = selected % 4;
-  if (t !== track) {                      // stays on this track if the preset named another project
-    selected = selected - t + track;
-    renderBank();
-    renderBuffer();
-  }
-  status(`preset ${i + 1} · track ${track + 1} recalled ✓ seed ${state.seed >>> 0}`);
+  if (!d) { status(`preset ${i + 1} is empty (track ${track + 1})`, "err"); return; }
+  const t = track;
+  applyStateData(d);                    // the knobs land on this track; the entry stays where it is
+  saveTrackState();
+  status(`preset ${i + 1} · track ${t + 1} recalled ✓ seed ${state.seed >>> 0}`);
 }
 
 function renderPresets() {
@@ -1543,7 +1689,7 @@ function renderPresets() {
   const lab = document.createElement("span");
   lab.className = "plabel";
   lab.textContent = `T${presetShownTrack + 1}`;
-  lab.title = "This preset bank follows the selected sequence's track (T1–T4).";
+  lab.title = "This preset bank belongs to the track (T1–T6): each track keeps its own.";
   el.appendChild(lab);
   const armBtn = (label, arm, title) => {
     const b = document.createElement("button");
@@ -1626,7 +1772,7 @@ function buildTransport() {
       state.playMode = v;
       status(v === "project"
         ? "play: the project's four sequences, tracks 1-4 (MIDI channels 1-4)"
-        : `play: the selected sequence on track ${(selected % 4) + 1} (MIDI channel ${(selected % 4) + 1})`);
+        : `play: the selected sequence on track ${track + 1} (MIDI channel ${track + 1})`);
     },
   });
   muteBtn.insertAdjacentElement("beforebegin", playEl);
@@ -1693,18 +1839,14 @@ function buildTransport() {
   ft.id = "ftrack";
   ft.title = "Destination track for Freeze and Clear — it follows the cell you select in the matrix; change it to write somewhere else once";
   ft.setAttribute("style", "font:600 11px/1.4 inherit;padding:2px 6px;border-radius:6px;background:#1b1926;color:#ececf0;border:1px solid #3a3750");
-  for (let i = 0; i < 4; i++) ft.append(new Option(`T${i + 1}`, String(i)));
+  const ntrk = () => Math.max(1, Math.min(6, fwInfo?.ntrk || NTRK_DEFAULT));
+  for (let i = 0; i < ntrk(); i++) ft.append(new Option(`T${i + 1}`, String(i)));
   document.getElementById("freeze").insertAdjacentElement("beforebegin", dl);
   dl.insertAdjacentElement("afterend", ft);
   // Picking a track here IS picking the track: it moves the matrix cursor to that
   // column of the current project, so the knobs, the preset bank, Play and Freeze
   // all follow the one choice (they stay in lockstep with the selected cell).
-  ft.addEventListener("change", () => {
-    const t = felTrack();
-    const cell = Math.floor(selected / 4) * 4 + t;
-    if (cell !== selected) selectSlot(cell);
-    else { status(`track ${t + 1}`); paintTrackState(); followTrack(t + 1); }
-  });
+  ft.addEventListener("change", () => switchTrack(felTrack()));
   document.getElementById("fill").addEventListener("click", doSendAll);
   document.getElementById("clearall").addEventListener("click",
     () => (profile === "felucca" ? doClearTrackFelucca() : doClearAll()));
