@@ -110,6 +110,12 @@ await (async () => {
     assert.equal(sectByTitle("Shape").style.display, "none", "the pitch shaping knobs too");
     assert.notEqual(sectByTitle("Lanes").style.display, "none", "the lanes must be shown");
   });
+  t("the lanes sit where Pitch was, not appended at the end of the panel", () => {
+    const order = [...document.querySelectorAll("#panel section.sect")].map((x) => x.querySelector("h3").textContent);
+    const iLanes = order.indexOf("Lanes"), iMemory = order.indexOf("Memory"), iRhythm = order.indexOf("Rhythm");
+    assert.ok(iLanes > iRhythm && iLanes < iMemory,
+              `panel order was ${order.join(" | ")}: Lanes must come before Memory (it replaces Pitch)`);
+  });
   t("the lane knobs are the four lanes plus rotate and grid", () => {
     const labels = [...sectByTitle("Lanes").querySelectorAll(".k-lab")].map((e) => e.textContent.trim()).join(" ");
     for (const w of ["Kick", "Snare", "Hat", "Open hat", "Rotate", "Grid"])

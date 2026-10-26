@@ -1449,7 +1449,9 @@ function buildRack() {
       format: (v) => v == 1 ? "1/16" : v == 2 ? "1/8" : v == 3 ? "1/4·" : "1/4",
       tip: "Snap the lane hits to the step grid: every step, every 2, every 4.", onInput: (v) => { state.lgrid = Math.round(v); scheduleRegen(); } })),
   ]);
-  panel.append(lanesSect);
+  // the lanes take the melody half's own place in the panel (not a section stuck at the bottom):
+  // Pitch and Shape are hidden and Lanes sits where they were, so the layout does not jump.
+  pitchSect.insertAdjacentElement("afterend", lanesSect);
   rackSections = { pitch: pitchSect, shape: shapeSect, lanes: lanesSect };
   paintDrumMode();
 }
