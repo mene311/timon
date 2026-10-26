@@ -21,7 +21,14 @@
 // g = period * P_SGATE / 128 — it cannot pass the row); across rows the only
 // way to hold is TIE (see holdLen / pulseSteps / tieStep below).
 
-export const CMD = { INFO: 1, GET: 2, SET: 3, STEP_GET: 6, STEP_SET: 7, PROJECT: 9, TRACK: 27, TRACK_STEP: 30, MOTION: 64 };
+export const CMD = {
+  INFO: 1, GET: 2, SET: 3, STEP_GET: 6, STEP_SET: 7, PROJECT: 9, TRACK: 27, TRACK_MIX: 29, TRACK_STEP: 30,
+  MOTION: 64, POOL: 78, LIST: 79, PERFORM: 80,
+};
+// LIST (79) ops, and the value an entry holds for a REST (page: "Pool, lists, PERFORM")
+export const LOP = { SET: 1, COPY: 2, PLAY: 3, CLEAR: 4, REPS: 5, SONG: 6, NEW: 7, COPY_PLUS: 8 };
+export const ENTRY_REST = 65;            // SET's value for a REST; an entry's 0 is empty
+export const PAT_NONE = 127;             // "on no entry's pattern", "no entry staged"
 export const ST = { NOTE: 0, TIE: 1, REST: 2 };
 export const SF = { ACCENT: 1, SLIDE: 2 };
 
@@ -46,7 +53,27 @@ function readStr(args, at) {
   return [s, at + 1];
 }
 
-// INFO reply -> the fields this app needs (the tagged tail is ignored).
+// The tagged tail of INFO: tag -> payload length, in the order the firmware writes them
+// (EDITOR_PROTOCOL.md, "INFO"). 0x57 and 0x58 are capability bitmaps.
+export const INFO_TAGS = {
+  0x55: 1,   // uiCaps
+  0x4D: 2,   // 64 01
+  0x42: 1,
+  0x46: 2,   // nfactory nbank
+  0x53: 1,
+  0x50: 1,
+  0x4E: 1,   // MENU settings' count
+  0x52: 1,   // ratchet (1.0.5)
+  0x4C: 1,   // parameter locks (1.1)
+  0x54: 4,   // light tracks: tracks, e0 e1 e2
+  0x43: 1,   // a step's FLAM, COND, NUDGE (W1)
+  0x4B: 1,   // the DRUM-X kit (W3)
+  0x57: 1,   // caps: bit0 TRANSPORT, bit1 PROJ_NAME, bit2 POOL, bit3 LIST, bit4 PERFORM, bit5 SMP_MIX, bit6 ties
+  0x49: 4,   // wide ids: P_COUNT, P_E0 (7 bits each, split)
+  0x58: 1,   // 2.0 caps: bit0 LIST2/NEW/COPY+/CHAIN/ONCE/EMPTY/UNUSED, bit1 entries' sounds
+};
+
+// INFO reply -> the fields this app needs, plus what the device says it can do.
 export function decodeInfo(args) {
   let at = 0, version;
   [version, at] = readStr(args, at);
@@ -56,31 +83,84 @@ export function decodeInfo(args) {
   for (let i = 0; i < nengines; i++) { let s; [s, at] = readStr(args, at); engines.push(s); }
   const ntrk = args[at] ?? 4;
   const chainRows = args[at + 1] ?? 16;
-  return { version, nengines, pcount, gcount, nstep, pe0, engines, ntrk, chainRows };
-}
-
-// The 12 step bytes a write carries (the drum grid is kept at zero).
-export function stepBytes(st) {
-  const notes = [0, 1, 2, 3].map((k) => (st.notes?.[k] ?? 0) & 0x7F);
-  return [Math.min(4, st.n ?? (st.notes?.length ?? 0)), ...notes, st.time & 3, st.flags & 3,
-    (st.vel ?? 0) & 0x7F, 0, 0, 0, (st.chance ?? 100) & 0x7F];
-}
-
-// A TRACK_STEP reply (track, index, then the 14 step bytes) -> a step object.
-export function readStep(args) {
-  return {
-    track: args[0], index: args[1],
-    n: args[2], notes: args.slice(3, 7), time: args[7], flags: args[8] & 3, vel: args[9],
-    hit: args[10], acc: args[11], hi: args[12], chance: args[13],
-    ratchet: args[14], nudge: args[15],
+  at += 2;
+  const tags = {};
+  while (at + 1 < args.length) {                     // the tagged blocks, in the firmware's own order
+    const id = args[at], sub = args[at + 1], len = INFO_TAGS[id];
+    if (sub !== 0x01 || len === undefined || at + 2 + len > args.length) break;
+    tags[id] = args.slice(at + 2, at + 2 + len);
+    at += 2 + len;
+  }
+  const c57 = tags[0x57]?.[0] ?? 0, c58 = tags[0x58]?.[0] ?? 0;
+  const caps = {
+    version,
+    ntrk, nstep, pcount, pe0, chainRows, engines,
+    wideIds: 0x49 in tags,                          // 1.3: parameter ids past 127
+    ratchet: 0x52 in tags,                          // 1.0.5: a step's ratchet byte
+    locks: 0x4C in tags,                            // 1.1: motion records can be locks
+    lightTracks: tags[0x54] ?? null,                // phase 6: [tracks, e0, e1, e2]
+    flam: 0x43 in tags,                             // W1: FLAM, COND, NUDGE
+    drumx: 0x4B in tags,                            // W3: the DRUM-X kit
+    transport: !!(c57 & 1),                         // TRANSPORT
+    projName: !!(c57 & 2),                          // PROJ_NAME
+    pool: !!(c57 & 4),                              // POOL (78): the 64-pattern pool
+    list: !!(c57 & 8),                              // LIST (79): the per-track entries
+    perform: !!(c57 & 16),                          // PERFORM (80)
+    smpMix: !!(c57 & 32),                           // #21: each slot sound's own mix
+    ties: !!(c57 & 64),                             // 2.0: a step's per-note ties
+    list2: !!(c58 & 1),                             // 2.0: LIST's NEW, COPY+, CHAIN, ONCE, EMPTY, CLEAR UNUSED
+    entrySounds: !!(c58 & 2),                       // #30: SOUND on the entries
+    tags,
   };
+  return { version, nengines, pcount, gcount, nstep, pe0, engines, ntrk, chainRows, tags, caps };
 }
 
-// Do the bytes we would write already equal what the device reports? (Only the
-// fields a write sets: the ratchet and nudge stay the device's.)
-export function sameStep(want, cur) {
-  const w = stepBytes(want);
-  const c = stepBytes(cur);
+// A step write's bytes. The fields go in the firmware's order and each one depends on the ones before
+// it (EDITOR_PROTOCOL.md: "the chance can only follow the hits, the ratchet the chance, ... the ties
+// the three"): so a write carries a PREFIX of the chain. `depth` says how far to go:
+//   0 the 8 base bytes (n, notes, time, flags, vel) - the step keeps its own hits, chance, ratchet
+//   1 + hits/acc/hi (v5)      2 + chance (v7)     3 + ratchet (1.0.5)
+//   4 + FLAM, COND, NUDGE (W1)                    5 + ties (2.0)
+// Anything we do not mean to change is read back first and written as it was.
+export function stepBytes(st, depth = 0) {
+  const notes = [0, 1, 2, 3].map((k) => (st.notes?.[k] ?? 0) & 0x7F);
+  const b = [Math.min(4, st.n ?? (st.notes?.length ?? 0)), ...notes, st.time & 3, st.flags & 3,
+    (st.vel ?? 0) & 0x7F];
+  if (depth >= 1) b.push((st.hit ?? 0) & 0x7F, (st.acc ?? 0) & 0x7F, (st.hi ?? 0) & 0x7F);
+  if (depth >= 2) b.push(Math.min(100, Math.max(0, st.chance ?? 100)) & 0x7F);
+  if (depth >= 3) b.push(Math.min(4, Math.max(1, st.ratchet ?? 1)) & 0x7F);
+  if (depth >= 4) b.push((st.flam ?? 0) & 1, (st.cond ?? 0) & 0x7F, ((st.nudge ?? 0) + 32) & 0x7F);
+  if (depth >= 5) b.push((st.ties ?? 0) & 15);
+  return b;
+}
+
+// The deepest field a device with these caps understands.
+export function stepDepth(caps) {
+  if (!caps) return 0;
+  let d = 5;                                        // 2.0 ties imply everything before them
+  if (!caps.ties) d = caps.flam ? 4 : caps.ratchet ? 3 : 1;
+  return d;
+}
+
+// TRACK_STEP / STEP_GET reply args -> a step object (the optional tail by its length).
+export function readStep(args, base = 2 /* TRACK_STEP: track, index */) {
+  const a = args.slice(base);
+  const st = {
+    n: a[0], notes: [a[1], a[2], a[3], a[4]], time: a[5], flags: a[6] & 3, vel: a[7],
+  };
+  if (a.length >= 11) { st.hit = a[8]; st.acc = a[9]; st.hi = a[10]; }
+  if (a.length >= 12) st.chance = a[11];
+  if (a.length >= 13) st.ratchet = a[12];
+  if (a.length >= 16) { st.flam = a[13]; st.cond = a[14]; st.nudge = a[15] - 32; }
+  if (a.length >= 17) st.ties = a[16] & 15;
+  if (base === 2) { st.track = args[0]; st.index = args[1]; }
+  return st;
+}
+
+// Do the bytes we would write already equal what the device reports? (Only the fields a write sets,
+// at the depth we would write them: the rest stay the device's.)
+export function sameStep(want, cur, depth = 0) {
+  const w = stepBytes(want, depth), c = stepBytes(cur, depth);
   return w.every((b, i) => b === c[i]);
 }
 
