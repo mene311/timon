@@ -216,6 +216,64 @@ const SNAP_GRID = 4;   // default grid-snap spacing, in steps
  *         humanize(0-100), octave(0-100), gravity(0-100), unipolar(bool),
  *         gateQuant(0-100), snapGrid(steps)
  */
+
+// ---------------------------------------------------------------- CHORDS knob (Lancha/Timón 2026-10-25)
+// 0 keeps a step monophonic; each step up applies a different voicing to the note the step already has.
+// Diatonic where the pattern has a scale and a root; fixed shapes where it does not.
+export const VOICINGS = ["SINGLE", "POWER", "TRIAD", "SEVENTH", "OPEN", "SUS", "ADD9"];
+export const VOICING_MAX_NOTES = 4;      // the FM-1's budget is 8 voices: a voicing costs 2..4 of them
+
+const mod12 = (n) => ((n % 12) + 12) % 12;
+
+// the scale degree a note sits on, or the nearest one when it is outside the scale
+function degreeOf(note, scale, root) {
+  const rel = mod12(note - root);
+  let best = 0, bestD = 99;
+  for (let i = 0; i < scale.length; i++) {
+    const d = Math.min(Math.abs(scale[i] - rel), 12 - Math.abs(scale[i] - rel));
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return best;
+}
+
+// the note k scale degrees above `note` (negative k goes down)
+function degreeUp(note, k, scale, root) {
+  const len = scale.length, i = degreeOf(note, scale, root);
+  const j = i + k, oct = Math.floor(j / len), idx = ((j % len) + len) % len;
+  return note + scale[idx] - scale[i] + 12 * oct;
+}
+
+// a voicing for one step's note: level 0 keeps it, 1..6 build chords. Returns [{note, vel}].
+export function voiceNotes(note, level, scale, root, vel = 100) {
+  const n = Math.round(note);
+  const one = [{ note: n, vel }];
+  if (!level) return one;
+  const dia = Array.isArray(scale) && scale.length >= 5;      // diatonic only for real scales, not chromatic runs
+  const sc = dia ? scale : SCALES.major;
+  const rt = dia ? (root | 0) : mod12(n);
+  const build = (semi) => {
+    const out = [{ note: n + (semi[0] | 0), vel }];      // the root sits at semi[0] (0, or -4 for the dominant)
+    for (const d of semi.slice(1)) {
+      const m = typeof d === "number" ? n + d : degreeUp(n, d, sc, rt);
+      if (m > 0 && m < 128 && !out.some((o) => o.note === m)) out.push({ note: Math.round(m), vel });
+    }
+    return out.slice(0, VOICING_MAX_NOTES);
+  };
+  switch (level) {
+    case 1: return build([0, 7]);                       // POWER
+    case 2: {                                            // TRIAD (diminished becomes its dominant)
+      const third = degreeUp(n, 2, sc, rt) - n, fifth = degreeUp(n, 4, sc, rt) - n;
+      if (third === 3 && fifth === 6) return build([-4, -1, 2]);
+      return build([0, third, fifth]);
+    }
+    case 3: return build([0, degreeUp(n, 2, sc, rt) - n, degreeUp(n, 4, sc, rt) - n, degreeUp(n, 6, sc, rt) - n]);
+    case 4: return build([0, degreeUp(n, 4, sc, rt) - n, degreeUp(n, 2, sc, rt) - n + 12]);   // OPEN
+    case 5: return build([0, 5, 7]);                       // SUS / QUARTAL
+    case 6: return build([0, degreeUp(n, 2, sc, rt) - n, degreeUp(n, 4, sc, rt) - n, 14]);   // ADD9
+    default: return one;
+  }
+}
+
 export function generate(params) {
   const rng = mulberry32(params.seed >>> 0);
   const lfoRng = mulberry32((params.seed ^ 0x3c6ef372) >>> 0);  // separate stream: switching the wave must not shift the gates
@@ -328,7 +386,7 @@ export function generate(params) {
     // of moving notes onto it means Gate still decides how many lines fire, so
     // density and grid stop fighting each other. Off-grid notes become rests.
     if (gateQuant && snapRng() < gateQuant && i % snapGrid !== 0) continue;
-    steps[i].notes = [{ note: clamp(Math.round(note), 0, 127), vel }];
+    steps[i].notes = voiceNotes(clamp(Math.round(note), 0, 127), params.chords | 0, params.scale, params.root, vel);
   }
   // Loop: the loop material is always the phrase's first `loopLen` steps. From
   // `loopStart` to the end, each step copies the material (wrapping at loopLen),
