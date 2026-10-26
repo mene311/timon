@@ -6,6 +6,7 @@ import { encodeWrite, emptyPattern } from "./pattern.js?v=65";
 import * as midi from "./midi.js?v=70";
 import * as fel from "./felucca.js?v=3";
 import { writeMatrix, writeBlock, clearMatrix, blockOf } from "./skiff-write.js?v=5";
+import { summarise, headline } from "./devstate.js?v=1";
 import * as audio from "./audio.js?v=67";
 import { knob, sw } from "./knob.js?v=67";
 
@@ -643,6 +644,95 @@ function scheduleTempoProbe() {
 }
 
 // --------------------------------------------------------------------------- //
+// What the unit says about itself: read-only, refreshed after every write so the result is the
+// device's answer rather than our assumption.
+// --------------------------------------------------------------------------- //
+let devState = null;
+
+async function readDeviceState(quiet = false) {
+  if (profile !== "felucca" || !midi.hasAccess() || !midi.findFm1()) {
+    if (!quiet) status("no unit on USB to read", "err");
+    return null;
+  }
+  if (!fwInfo?.caps?.pool || !fwInfo?.caps?.list) {
+    if (!quiet) status(`${fwInfo?.version ?? "this firmware"} has no POOL/LIST: nothing to read`, "err");
+    return null;
+  }
+  const pool = fel.decodePool(await felReq(fel.CMD.POOL, []) ?? []);
+  const list = fel.decodeList(await felReq(fel.CMD.LIST, []) ?? []);
+  devState = summarise(pool, list, track);
+  paintDeviceState();
+  if (!quiet) status(headline(devState), "ok");
+  return devState;
+}
+
+function paintDeviceState() {
+  const host = document.getElementById("devstate");
+  if (!host || !devState) return;
+  const s = devState;
+  const sum = host.querySelector("summary");
+  if (sum) sum.textContent = headline(s);
+  const strip = host.querySelector(".poolstrip");
+  if (strip) {
+    strip.innerHTML = "";
+    for (const p of s.patterns) {
+      const c = document.createElement("i");
+      c.className = "pc" + (p.len ? (p.uses ? " used" : " kept") : "");
+      c.title = p.len ? `pattern ${p.id + 1}: ${p.len} steps, ${p.uses} entr${p.uses === 1 ? "y" : "ies"}` : `pattern ${p.id + 1}: empty`;
+      strip.appendChild(c);
+    }
+  }
+  const grid = host.querySelector(".matrix");
+  if (grid) {
+    grid.innerHTML = "";
+    s.cells.forEach((row, t) => {
+      const line = document.createElement("div");
+      line.className = "mrow" + (t === s.current ? " cur" : "");
+      const name = document.createElement("b");
+      name.textContent = `T${t + 1}`;
+      line.appendChild(name);
+      row.forEach((c, e) => {
+        const x = document.createElement("i");
+        x.className = "mc" + (c.value === 0 ? "" : c.value === 65 ? " rest" : " on") + (c.chained ? " chain" : "");
+        x.textContent = c.value === 0 ? "·" : c.value === 65 ? "R" : String(c.value);
+        x.title = c.value === 0 ? `T${t + 1} entry ${e + 1}: empty`
+          : c.value === 65 ? `T${t + 1} entry ${e + 1}: a REST (${c.reps} reps)`
+          : `T${t + 1} entry ${e + 1}: pattern ${c.value}${c.reps > 1 ? ` x${c.reps}` : ""}${c.chained ? " (chain)" : ""}`;
+        line.appendChild(x);
+      });
+      grid.appendChild(line);
+    });
+  }
+}
+
+function buildDeviceState() {
+  const host = document.createElement("details");
+  host.id = "devstate";
+  host.setAttribute("style", "margin-top:14px;font:600 11px/1.5 inherit");
+  const sum = document.createElement("summary");
+  sum.textContent = "no state read yet";
+  sum.setAttribute("style", "cursor:pointer;letter-spacing:.04em;opacity:.85");
+  const pool = document.createElement("div");
+  pool.className = "poolstrip";
+  pool.setAttribute("style", "display:grid;grid-template-columns:repeat(16,1fr);gap:3px;margin:10px 0");
+  const grid = document.createElement("div");
+  grid.className = "matrix";
+  grid.setAttribute("style", "display:grid;gap:3px");
+  host.append(sum, pool, grid);
+  const css = document.createElement("style");
+  css.textContent = `#devstate .poolstrip i{display:block;height:9px;border-radius:2px;background:#242231}
+#devstate .poolstrip i.kept{background:#4a4566}#devstate .poolstrip i.used{background:#8f7ae0}
+#devstate .mrow{display:grid;grid-template-columns:22px repeat(16,1fr);gap:3px;align-items:center}
+#devstate .mrow b{font-size:9px;opacity:.6;font-weight:600}
+#devstate .mrow.cur b{opacity:1;color:#8f7ae0}
+#devstate .mc{display:block;text-align:center;font-size:9px;padding:1px 0;border-radius:2px;background:#1b1926;color:#6b6780}
+#devstate .mc.on{background:#332f4a;color:#e8e5f5}#devstate .mc.rest{background:#2a2438;color:#b9a6ff}
+#devstate .mc.chain{box-shadow:inset 0 -2px 0 #8f7ae0}`;
+  document.head.appendChild(css);
+  document.getElementById("panel").appendChild(host);
+}
+
+// --------------------------------------------------------------------------- //
 // Freeze / clear
 // --------------------------------------------------------------------------- //
 // The FM-1 keeps each pattern's tempo in its global settings block, as a
@@ -744,6 +834,7 @@ async function doFreezeSkiff(slotIndex) {
       onStatus: (m) => status(m),
     });
     status(`sequence ${slotIndex + 1} frozen → T${dest + 1} entry ${selected + 1} ✓`, "ok");
+    readDeviceState(true).catch(() => null);
   } catch (e) {
     status(String(e.message || e), "err");
   } finally { busy = false; }
@@ -767,6 +858,7 @@ async function doFillSkiff() {
     status(`writing 16 sequences → T${dest + 1} (patterns ${block.lo}-${block.hi})…`);
     await writeBlock(skiffDevice, { track: dest, patterns, nstep, depth, onStatus: (m) => status(m) });
     status(`16 sequences → T${dest + 1} patterns ${block.lo}-${block.hi} ✓`, "ok");
+    readDeviceState(true).catch(() => null);
   } catch (e) {
     status(String(e.message || e), "err");
   } finally { busy = false; }
@@ -781,6 +873,7 @@ async function doClearSkiff() {
     const dest = felTrack();
     await clearMatrix(skiffDevice, { cells: [{ track: dest, entry: selected }] });
     status(`cleared T${dest + 1} entry ${selected + 1} ✓`, "ok");
+    readDeviceState(true).catch(() => null);
   } catch (e) {
     status(String(e.message || e), "err");
   } finally { busy = false; }
@@ -1982,6 +2075,14 @@ function buildTransport() {
   tb.id = "tempolink";
   tb.className = "glink";
   db.insertAdjacentElement("afterend", tb);
+  const rb = document.createElement("button");
+  rb.id = "devread";
+  rb.className = "glink";
+  rb.textContent = "READ";
+  tb.insertAdjacentElement("afterend", rb);
+  rb.title = "Read the unit: the 64-pattern pool and the six tracks' 16 entries as the FM-1 reports them";
+  rb.addEventListener("click", () => { readDeviceState().catch((e) => status(String(e.message || e), "err")); });
+  buildDeviceState();
   paintTempoLink();                       // the button shows the stored state as soon as it exists
   tb.addEventListener("click", () => {
     const i = TEMPO_LINKS.findIndex(([k]) => k === tempoLink);
