@@ -45,6 +45,9 @@ So the thing Timón has to own is a **matrix of 6 tracks × 16 entries = 96 cell
 pool**: 96 cells > 64 patterns, so reuse is normal and expected (the same pattern on several
 tracks/entries is a feature, not a collision).
 
+DECIDED (user, 2026-10-25): we are **restricted by the 64**. The generator makes 64 distinct
+patterns; the 96 cells assign from those, repeating where it helps. Never assume 96 distinct.
+
 What that changes from the first plan:
 
 - The generator emits **64 patterns**, not 16, and they go into the pool by id (0..63).
@@ -67,3 +70,43 @@ Rule: **when a track's engine is DRUM/DRUM-X, the melody section is disabled, no
   name, so the 6th row reads at a glance.
 - Switching a track from a synth engine to DRUM re-labels the row; the pattern data for the synth
   stays in the pool untouched (nothing is destroyed by switching).
+
+
+## CHORDS knob (user, 2026-10-25)
+
+One knob per track, cycling a list of voicings: **0 = a single note**, then each step up through
+the list applies a different voicing to whatever note the step already has.
+
+Ladder (order chosen for musical usefulness, not theory completeness):
+
+| value | voicing | notes |
+| --- | --- | --- |
+| 0 | SINGLE | the step's note, mono |
+| 1 | POWER | root + 5th |
+| 2 | TRIAD | the scale's triad on the step's degree |
+| 3 | SEVENTH | triad + the scale's 7th |
+| 4 | OPEN | triad with the middle voice up an octave (drop-2 feel) |
+| 5 | SUS / QUARTAL | root + 4th + 5th |
+| 6 | ADD9 / WIDE | root + triad + 9th up top |
+
+Rules:
+
+- Voicings are **diatonic to the pattern's key/scale** when there is one; where the source is not
+  scale-bound, fixed intervals (the POWER / SUS sets) are used instead.
+- Note **lengths follow the step** as 2.0 encodes them (1..16 steps, or a fraction of one), so a
+  chord holds as long as its note does.
+- Cycling is one-directional through the table (there is no "negative" voicing); the knob's value is
+  stored per track and kept in the project.
+
+### The polyphony wall — read this before shipping chords
+
+Skiff's voice budget is **8 voices**, and a voicing costs 2 to 4 of them. So chords are cheap on a
+solo track and ruinous on a full song: two 4-note tracks already eat the whole budget and the third
+track starts stealing voices.
+
+Therefore the knob ships with:
+
+- a **voice meter** (notes now vs the 8-voice budget), visible whenever any track is above 0;
+- a soft cap that warns rather than silently stealing — the user decides, the tool does not;
+- drums unaffected: on a DRUM/DRUM-X track the melody section is off, so the CHORDS knob is hidden
+  with it.
