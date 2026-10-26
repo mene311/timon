@@ -23,12 +23,19 @@ export async function readState(dev) {
   return { pool, list };
 }
 
-// Refuse early, with the reason, rather than half writing and failing.
+// Refuse early only for what we can know without asking: room in the pool. Whether the unit is PLAYING
+// is the device's answer, not a field to guess at: LIST's SONG byte is song MODE (on/off), and a refused
+// op comes back with rc 3 ("the unit is playing") — so the ops below raise that where it happens.
 export function checkWritable(state, need) {
-  if (state.list.song) throw new Error("the song is running: stop it (LIST writes and pool clears need the unit stopped)");
   if (state.pool.free < need) throw new Error(`the pool has ${state.pool.free} free pattern${state.pool.free === 1 ? "" : "s"}; this plan needs ${need} — clear some first (POOL > CLEAR UNUSED)`);
   if (state.list.tracks.length < 1) throw new Error("the unit reported no tracks");
 }
+
+// rc 3 is the device saying it is playing: that is worth its own sentence, since it is the one thing the
+// user has to change on the unit itself.
+const refuse = (what, rc) => (rc === 3
+  ? new Error(`${what}: the unit is playing — press PLAY to stop it, then try again`)
+  : new Error(`${what}: ${RC_TEXT[rc] ?? "no reply"}`));
 
 // Write `patterns` into the pool and point `cells` (x-track, entry) at them.
 //   patterns: [[step, ...], ...]   up to 64; each step as the codec's readStep()
@@ -56,7 +63,7 @@ export async function writeMatrix(dev, opts) {
   for (let k = 0; k < patterns.length; k++) {
     onStatus(`pattern ${k + 1}/${patterns.length}: allocating a pool slot…`);
     const r = await dev.listOp(fel.LOP.NEW, authorTrack, authorEntry);
-    if (!r || r.rc !== 0) throw new Error(`NEW failed: ${RC_TEXT[r?.rc] ?? "no reply"}`);
+    if (!r || r.rc !== 0) throw refuse("allocating a pool slot", r?.rc);
     const id = r.tracks[authorTrack].pattern;
     if (id < 0 || id > 63) throw new Error(`the unit reported pattern ${id}, which is outside the pool`);
     ids.push(id);
@@ -80,7 +87,7 @@ export async function writeMatrix(dev, opts) {
 
   for (const c of cells) {
     const r = await dev.listOp(fel.LOP.SET, c.track, c.entry, ids[c.pattern] + 1);
-    if (!r || r.rc !== 0) throw new Error(`SET track ${c.track + 1} entry ${c.entry}: ${RC_TEXT[r?.rc] ?? "no reply"}`);
+    if (!r || r.rc !== 0) throw refuse(`SET track ${c.track + 1} entry ${c.entry}`, r?.rc);
   }
 
   // read it all back: every cell must name the pattern the plan says
@@ -99,21 +106,20 @@ export async function writeMatrix(dev, opts) {
 
 // Clear cells (LIST CLEAR) and/or pool patterns (POOL CLEAR / EMPTY / CLEAR UNUSED).
 export async function clearMatrix(dev, { cells = [], patterns = [], mode = "clear", onStatus = () => {} } = {}) {
-  const state = await readState(dev);
-  if (state.list.song) throw new Error("stop the song first: clears need the unit stopped");
+  const state = await readState(dev);          // (song MODE is not "playing"; a refusal says so with rc 3)
   for (const c of cells) {
     const r = await dev.listOp(fel.LOP.CLEAR, c.track, c.entry);
-    if (!r || r.rc !== 0) throw new Error(`CLEAR track ${c.track + 1} entry ${c.entry}: ${RC_TEXT[r?.rc] ?? "no reply"}`);
+    if (!r || r.rc !== 0) throw refuse(`CLEAR track ${c.track + 1} entry ${c.entry}`, r?.rc);
   }
   if (patterns.length) {
     const op = mode === "empty" ? 2 : 1;                  // 2: EMPTY (2.0), 1: CLEAR
     for (const p of patterns) {
       const r = await dev.poolOp(op, p);
-      if (!r || r.rc !== 0) throw new Error(`POOL ${mode} pattern ${p}: ${RC_TEXT[r?.rc] ?? "no reply"}`);
+      if (!r || r.rc !== 0) throw refuse(`POOL ${mode} pattern ${p}`, r?.rc);
     }
   } else if (mode === "unused") {
     const r = await dev.poolOp(3);
-    if (!r || r.rc !== 0) throw new Error(`POOL CLEAR UNUSED: ${RC_TEXT[r?.rc] ?? "no reply"}`);
+    if (!r || r.rc !== 0) throw refuse("POOL CLEAR UNUSED", r?.rc);
   }
   onStatus("cleared");
 }

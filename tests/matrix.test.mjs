@@ -8,7 +8,7 @@ const NSTEP = 64, NTRK = 6, NTAG = 16;
 const mkStep = (n, notes, ties = 0) => ({ n, notes: [notes[0] ?? 0, notes[1] ?? 0, 0, 0], time: n ? 0 : 2,
   flags: 0, vel: n ? 100 : 0, hit: 0, acc: 0, hi: 0, chance: 100, ratchet: 1, flam: 0, cond: 0, nudge: 0, ties });
 
-function fakeDevice({ song = 0, silentWrites = false } = {}) {
+function fakeDevice({ song = 0, playing = 0, silentWrites = false } = {}) {
   const pool = Array.from({ length: 64 }, () => ({ len: 0, uses: 0, steps: null }));
   const tracks = Array.from({ length: NTRK }, () => ({
     entry: 127, pattern: 127,
@@ -27,7 +27,7 @@ function fakeDevice({ song = 0, silentWrites = false } = {}) {
     raw: (id, i) => pool[id]?.steps?.[i],          // (the test's own peephole: the pool's content)
     list: async () => listState(),
     listOp: async (op, tr, en, value) => {
-      if (song) return { rc: 3, tracks: [] };
+      if (playing) return { rc: 3, tracks: [] };
       if (op === fel.LOP.NEW) {
         calls.new++;
         const id = firstFree();
@@ -66,7 +66,7 @@ function fakeDevice({ song = 0, silentWrites = false } = {}) {
       return back;
     },
     poolOp: async (op, id) => {
-      if (song) return { rc: 3 };
+      if (playing) return { rc: 3 };
       if (op === 1 || op === 2) { if (pool[id].uses > 0) return { rc: 2 }; pool[id] = { len: 0, uses: 0, steps: null }; }
       if (op === 3) for (let i = 0; i < 64; i++) if (!pool[i].uses) pool[i] = { len: 0, uses: 0, steps: null };
       return { rc: 0 };
@@ -110,10 +110,16 @@ await tAsync("writeMatrix: a pattern written twice across cells is stored once",
   assert.deepEqual([0, 1, 2].map((tr) => st.tracks[tr].entries[0].value), [1, 1, 1]);
 });
 
-await tAsync("writeMatrix: refuses while the song runs", async () => {
-  const dev = fakeDevice({ song: 1 });
+await tAsync("writeMatrix: song MODE on is not a refusal — the unit is stopped and the write goes ahead", async () => {
+  const dev = fakeDevice({ song: 1 });                 // song mode on, but playing = 0
+  const r = await writeMatrix(dev, { patterns: [pat([0])], cells: [{ track: 0, entry: 0, pattern: 0 }], nstep: NSTEP });
+  assert.deepEqual(r.ids, [0]);
+});
+
+await tAsync("writeMatrix: a unit that is playing refuses with rc 3 and says so", async () => {
+  const dev = fakeDevice({ playing: 1 });
   await assert.rejects(() => writeMatrix(dev, { patterns: [pat([0])], cells: [{ track: 0, entry: 0, pattern: 0 }], nstep: NSTEP }),
-                       /stop it/);
+                       /the unit is playing — press PLAY to stop it/);
 });
 
 await tAsync("writeMatrix: refuses when the pool is too full", async () => {
@@ -174,8 +180,8 @@ await tAsync("clearMatrix: clears entries and unused pool slots", async () => {
   assert.equal(p.free, 64);
 });
 
-t("checkWritable: reasons, not just a boolean", () => {
-  assert.throws(() => checkWritable({ list: { song: 1, tracks: [1] }, pool: { free: 9 } }, 1), /song is running/);
+t("checkWritable: room and tracks, never the song byte", () => {
+  assert.doesNotThrow(() => checkWritable({ list: { song: 1, tracks: [1] }, pool: { free: 9 } }, 1));
   assert.throws(() => checkWritable({ list: { song: 0, tracks: [1] }, pool: { free: 0 } }, 1), /pool has 0 free/);
   assert.doesNotThrow(() => checkWritable({ list: { song: 0, tracks: [1] }, pool: { free: 9 } }, 1));
 });
