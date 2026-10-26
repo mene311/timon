@@ -33,7 +33,9 @@ t("cells carry the pattern id, a REST and an empty entry apart", () => {
 
 t("headline names the current track's entry and pattern", () => {
   const s = summarise(pool([0, 1, 2], [1]), list([
-    { entry: 2, pattern: 1 }, { entry: 127, pattern: 127 }, {}, {}, {}, {}]), 1);
+    { entry: 127, pattern: 127 },                    // T1: on no entry
+    { entry: 2, pattern: 1 },                        // T2: entry 3, pattern 2
+    {}, {}, {}, {}]), 1);
   assert.match(headline(s), /T2 on entry 3, pattern 2/);
   assert.match(headline(s), /pool 1\/3 used of 64/);
   assert.match(headline(s), /song ON/);
