@@ -926,30 +926,6 @@ async function doFreezeSkiff(slotIndex) {
   } finally { busy = false; }
 }
 
-async function doFillSkiff() {
-  if (busy) return;
-  const info = fwInfo ?? await detectFirmware();
-  if (!skiffReady()) return status(needSkiff(), "err");
-  const dest = felTrack();
-  const block = blockOf(dest);
-  if (!block) {
-    status(`T${dest + 1} has no block of 16: the pool is 64 patterns, so only T1-T4 have one (T1 1-16, T2 17-32, T3 33-48, T4 49-64)`, "err");
-    return;
-  }
-  busy = true;
-  try {
-    const nstep = info?.nstep || 64;
-    const depth = Math.min(4, fel.stepDepth(info?.caps));
-    const patterns = bank.slice(0, 16).map((b) => stepsOf(b, info).steps);
-    status(`writing T${dest + 1} patterns A-P (pool ${block.lo}-${block.hi})…`);
-    await writeBlock(skiffDevice, { track: dest, patterns, nstep, depth, onStatus: (m) => status(m) });
-    status(`T${dest + 1}: patterns A-P written (pool ${block.lo}-${block.hi}) ✓`, "ok");
-    readDeviceState(true).catch(() => null);
-  } catch (e) {
-    status(String(e.message || e), "err");
-  } finally { busy = false; }
-}
-
 async function doClearSkiff() {
   if (busy) return;
   const info = fwInfo ?? await detectFirmware();
@@ -967,12 +943,6 @@ async function doClearSkiff() {
 
 async function doFreeze() {
   return doWriteSteps();                                   // the firmware-agnostic write
-}
-
-async function doSendAll() {
-  const info = fwInfo ?? await detectFirmware();
-  if (!info?.caps?.list2) return status(needSkiff(), "err");
-  return doFillSkiff();
 }
 
 async function doClearAll() {
@@ -1020,10 +990,6 @@ function paintProfile() {
   if (freezeBtn) freezeBtn.title = fwInfo?.caps?.list2
     ? "Write this sequence into the unit: one pattern in the pool, named by the entry shown on the left"
     : "Write the selected sequence into the target track (F)";
-  const fillBtn = document.getElementById("fill");
-  if (fillBtn) fillBtn.title = fwInfo?.caps?.list2
-    ? "Write all 16 sequences of this track into its own block of the pool (T1 1-16, T2 17-32, T3 33-48, T4 49-64)"
-    : "Write all 16 sequences into projects A-D (slots 1-4 -> A tracks 1-4, then B, C, D)";
   const clearBtn = document.getElementById("clearall");
   if (clearBtn) clearBtn.title = fwInfo?.caps?.list2
     ? "Clear this entry on the target track (a 2.0 unit: LIST CLEAR; its pattern goes when nothing else names it)"
@@ -1083,8 +1049,8 @@ const linkHas = (d) => tempoLink === "both" || tempoLink === d;
 
 // Where the next write goes, in the unit's words: track, entry, and the pattern (or block) it lands
 // in. Felucca's projects are only mentioned on firmware that actually has them.
-// The buttons' words follow the firmware: a pool/entry unit gets WRITE / WRITE 16 / CLEAR, an older one
-// keeps its own vocabulary. Called at build, on every track/entry change and whenever the unit answers.
+// The buttons' words, set at build and whenever the unit answers: WRITE and CLEAR only, because that is
+// all Timón does - the steps of the sequence you are on, into the track you point it at.
 function paintWording() {
   const entries = !!fwInfo?.caps?.list2;                 // the pool/entry commands: a 2.0 convenience
   const nothing = fwInfo ? "" : "connect the unit over USB to write";
@@ -1098,7 +1064,6 @@ function paintWording() {
   };
   set("freeze", "WRITE", !!fwInfo, nothing);            // any firmware: steps into the track
   set("clearall", "CLEAR", !!fwInfo, nothing);
-  set("fill", "WRITE 16", entries, fwInfo ? "this firmware has no pool/entries, so there is nothing to fill 16 of" : nothing);
   paintTarget();
 }
 
@@ -1116,10 +1081,8 @@ function paintTarget() {
   el.textContent = `→ T${t} · pattern ${e} of the bank`;
   el.title = `WRITE puts this sequence's ${fwInfo.nstep || 64} steps into T${t}, on whatever pattern the unit is ` +
              `playing (A-P is this bank's name for it). CLEAR sets T${t}'s steps to rest. ` +
-             (fwInfo.caps?.list2
-               ? (blk ? `WRITE 16 additionally fills T${t} entries A-P with pool patterns ${blk.lo}-${blk.hi}.`
-                      : `T${t} has no block of 16 left in the pool, so WRITE 16 is off for it.`)
-               : `This firmware has no pool: only WRITE and CLEAR apply.`);
+             (fwInfo.caps?.list2 ? `This unit keeps a pool of patterns; WRITE only touches the one T${t} is on.`
+                                 : `This firmware has no pool: WRITE and CLEAR are all it takes.`);
   el.dataset.mode = fwInfo.caps?.list2 ? "skiff" : "plain";
 }
 
@@ -2171,7 +2134,6 @@ function buildTransport() {
     doGenerate(false);
     status(state.drums ? `T${track + 1} is a drum track (lanes, no pitch)` : `T${track + 1} plays pitched notes`, "ok");
   });
-  document.getElementById("fill").addEventListener("click", doSendAll);
   document.getElementById("clearall").addEventListener("click",
     () => doClearAll());
   document.getElementById("diag")?.addEventListener("click", dumpGset);
