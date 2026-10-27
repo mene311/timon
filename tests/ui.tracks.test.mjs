@@ -148,10 +148,18 @@ t("with no unit, the write buttons are off and say why", () => {
   const el = document.getElementById("wtarget");
   assert.ok(el, "no #wtarget readout");
   assert.equal(el.dataset.mode, "none");
-  assert.equal(document.getElementById("freeze").textContent, "WRITE");
-  assert.equal(document.getElementById("freeze").disabled, true, "writing needs a pool/entry unit");
-  assert.match(document.getElementById("freeze").title, /connect the unit/i);
-  assert.equal(document.getElementById("clearall").disabled, true);
+  for (const id of ["freeze", "clearall", "fill"]) {
+    assert.equal(document.getElementById(id).disabled, true, `${id} needs a unit`);
+    assert.match(document.getElementById(id).title, /connect the unit/i);
+  }
+});
+
+t("WRITE and CLEAR are the plain pair; only WRITE 16 depends on the pool", () => {
+  const btn = document.getElementById("freeze"), fill = document.getElementById("fill");
+  assert.equal(btn.textContent, "WRITE");
+  assert.equal(document.getElementById("clearall").textContent, "CLEAR");
+  assert.equal(fill.textContent, "WRITE 16");
+  assert.match(fill.title, /connect the unit over USB/i, "no unit: the fill button says what it needs");
 });
 
 t("the tempo link button exists, offers four states and remembers the choice", () => {
