@@ -318,7 +318,7 @@ export function generateDrums(params = {}) {
   const all = [...DRUM_LANES, ...DRUM_LANES_MORE];
   const lanes = (params.lanes || DRUM_LANES.map((_, i) => ({ pulses: [4, 2, 8, 0][i] ?? 0 })))
     .map((l, i) => ({ ...l, note: all[i]?.note ?? DRUM_LANES[0].note }));
-  const masks = lanes.map((l) => laneHits(l.pulses ?? 0, len, l.rotate ?? 0, l.grid ?? 1));
+  const masks = lanes.map((l) => laneHits(l.pulses ?? 0, len, l.rotate ?? 0, l.grid ?? params.grid ?? 1));
   const steps = Array.from({ length: 64 }, () => ({ rate: params.rate, notes: [] }));
   for (let i = 0; i < 64; i++) {
     const j = i % len, beat = j % 4 === 0;
@@ -335,6 +335,29 @@ export function generateDrums(params = {}) {
 export function drumCell(step) {
   const hits = new Set((step?.notes || []).map((n) => n.note));
   return DRUM_LANES.map((l) => (hits.has(l.note) ? l.key : ".")).join("");
+}
+
+// A drum track's sixteen sequences: the four lanes of the Euclidean figure, each slot a rotation of it
+// (a bank of variations, not sixteen copies). No pitch, no scale: a drum track has lanes.
+export function drumBank(state, slots = 16, laneAll = DRUM_LANES) {
+  const out = [];
+  const rot0 = Math.round(state.lrot ?? 0);
+  const grid = Math.max(1, Math.round(state.lgrid ?? 1));
+  for (let k = 0; k < slots; k++) {
+    const steps = generateDrums({
+      rate: state.rate,
+      grid,
+      accent: 12,
+      lanes: [
+        { pulses: Math.round(state.kick ?? 4), rotate: 0, vel: 112 },
+        { pulses: Math.round(state.snare ?? 2), rotate: 0, vel: 100 },
+        { pulses: Math.round(state.chh ?? 8), rotate: (rot0 + k) % 16, vel: 82 },
+        { pulses: Math.round(state.ohh ?? 0), rotate: (rot0 + k) % 16, vel: 92 },
+      ],
+    });
+    out.push({ length: Math.min(64, Math.round(state.length ?? 16)), rate: state.rate, steps });
+  }
+  return out;
 }
 
 export function generate(params) {

@@ -1,7 +1,7 @@
 // rack.js — the single-module knob UI. Same engine as app.js (generator, pattern,
 // midi, audio); only the controls differ: one portrait case, knobs on top and the
 // pattern display inside the case below. app.js and the MVP are untouched.
-import { generate, generateBank, SCALES, LFO_WAVES, midiName, classicName, euclid } from "./generator.js?v=71";
+import { generate, generateBank, drumBank, SCALES, LFO_WAVES, midiName, classicName, euclid } from "./generator.js?v=72";
 import { encodeWrite, emptyPattern } from "./pattern.js?v=65";
 import * as midi from "./midi.js?v=70";
 import * as fel from "./felucca.js?v=4";
@@ -572,32 +572,10 @@ function syncHeader() {
 // --------------------------------------------------------------------------- //
 // Generation
 // --------------------------------------------------------------------------- //
-// A drum track's 16 sequences: the four lanes of the Euclidean figure, each slot a rotation of it, so
-// the bank is a set of variations rather than 16 copies. No pitch, no scale, no chords.
-function drumBank() {
-  const out = [];
-  const rot0 = Math.round(state.lrot ?? 0);
-  for (let k = 0; k < SLOTS; k++) {
-    const steps = generateDrums({
-      rate: state.rate,
-      grid: Math.max(1, Math.round(state.lgrid ?? 1)),
-      accent: 12,
-      lanes: [
-        { pulses: Math.round(state.kick ?? 4), rotate: 0, vel: 112 },
-        { pulses: Math.round(state.snare ?? 2), rotate: 0, vel: 100 },
-        { pulses: Math.round(state.chh ?? 8), rotate: (rot0 + k) % 16, vel: 82 },
-        { pulses: Math.round(state.ohh ?? 0), rotate: (rot0 + k) % 16, vel: 92 },
-      ],
-    });
-    out.push({ length: Math.min(64, Math.round(state.length ?? 16)), rate: state.rate, steps });
-  }
-  return out;
-}
-
 function doGenerate(newSeed = false) {
   if (newSeed) state.seed = (Math.random() * 1e9) | 0;
   refs.seed?.setValue(state.seed, false);
-  bank = state.drums ? drumBank() : generateBank(state, state.drift);
+  bank = state.drums ? drumBank(state, SLOTS) : generateBank(state, state.drift);
   applyLocks();
   renderBank(); renderBuffer();
   saveTrackState();          // the bank and the knobs belong to the selected track
@@ -609,7 +587,7 @@ function scheduleRegen() {
   saveTrackState();          // the knobs are the selected track's
   clearTimeout(regenTimer);
   regenTimer = setTimeout(() => {
-    bank = state.drums ? drumBank() : generateBank(state, state.drift);
+    bank = state.drums ? drumBank(state, SLOTS) : generateBank(state, state.drift);
     applyLocks();
     renderBank(); renderBuffer();
   }, 40);
