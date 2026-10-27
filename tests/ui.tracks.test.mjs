@@ -77,7 +77,7 @@ await (async () => {
     assert.ok("0" in cur, `cursor map was ${JSON.stringify(cur)}`);
   });
   t("the status line names the track it switched to", () => {
-    assert.match(status(), /track 5|track 1/i, `status was ${JSON.stringify(status())}`);
+    assert.match(status(), /T5 of 6/, `status was ${JSON.stringify(status())}`);
   });
 })();
 
@@ -88,6 +88,11 @@ await (async () => {
   await sleep(10);
   t("going back to T1 restores that track's state", () => {
     assert.equal(label(), "T1");
+  });
+  t("the entries are named A..P, not 1..16", () => {
+    const sn = document.getElementById("selnum");
+    assert.ok(sn, "no #selnum");
+    assert.match(sn.textContent, /^[A-P]$/, `selnum was ${JSON.stringify(sn.textContent)}`);
   });
 })();
 

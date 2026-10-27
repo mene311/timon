@@ -14,6 +14,8 @@ import { knob, sw } from "./knob.js?v=67";
 const RATE_NAMES = ["1/1", "1/2", "1/4", "1/4T", "1/8", "1/8T", "1/16", "1/16T", "1/32", "1/32T"];
 const RATE_QUARTERS = [4, 2, 1, 2 / 3, 0.5, 1 / 3, 0.25, 1 / 6, 0.125, 1 / 12];
 const SLOTS = 16;
+const LET = "ABCDEFGHIJKLMNOP";               // the entries A..P of one project's track
+const entryLetter = (i) => LET[Math.max(0, Math.min(15, i | 0))];
 
 const DEFAULT = {
   seed: (Math.random() * 1e9) | 0,
@@ -232,7 +234,8 @@ function renderBuffer() {
     cell.addEventListener("click", () => selectStep(i));
     el.appendChild(cell);
   }
-  document.getElementById("selnum").textContent = String(selected + 1);
+  const sn = document.getElementById("selnum");
+  if (sn) sn.textContent = entryLetter(selected);     // A..P, not 1..16
   document.getElementById("bufinfo").textContent = `${p.length} steps · ${RATE_NAMES[p.rate]} · ${noteCount(p)} notes`;
   renderEditor();
   fitSteps();
@@ -857,13 +860,13 @@ async function doFreezeSkiff(slotIndex) {
   try {
     const dest = felTrack();
     const { steps, depth } = stepsOf(bank[slotIndex], info);
-    status(`freezing sequence ${slotIndex + 1} → track ${dest + 1}, entry ${selected + 1}…`);
+    status(`writing pattern ${entryLetter(slotIndex)} → T${dest + 1} entry ${entryLetter(selected)}…`);
     await writeMatrix(skiffDevice, {
       patterns: [steps], cells: [{ track: dest, entry: selected, pattern: 0 }], nstep: info?.nstep || 64, depth,
       authorTrack: dest, authorEntry: 15 - 0,
       onStatus: (m) => status(m),
     });
-    status(`sequence ${slotIndex + 1} frozen → T${dest + 1} entry ${selected + 1} ✓`, "ok");
+    status(`pattern ${entryLetter(slotIndex)} written → T${dest + 1} entry ${entryLetter(selected)} ✓`, "ok");
     readDeviceState(true).catch(() => null);
   } catch (e) {
     status(String(e.message || e), "err");
@@ -885,9 +888,9 @@ async function doFillSkiff() {
     const nstep = info?.nstep || 64;
     const depth = Math.min(4, fel.stepDepth(info?.caps));
     const patterns = bank.slice(0, 16).map((b) => stepsOf(b, info).steps);
-    status(`writing 16 sequences → T${dest + 1} (patterns ${block.lo}-${block.hi})…`);
+    status(`writing T${dest + 1} patterns A-P (pool ${block.lo}-${block.hi})…`);
     await writeBlock(skiffDevice, { track: dest, patterns, nstep, depth, onStatus: (m) => status(m) });
-    status(`16 sequences → T${dest + 1} patterns ${block.lo}-${block.hi} ✓`, "ok");
+    status(`T${dest + 1}: patterns A-P written (pool ${block.lo}-${block.hi}) ✓`, "ok");
     readDeviceState(true).catch(() => null);
   } catch (e) {
     status(String(e.message || e), "err");
@@ -902,7 +905,7 @@ async function doClearSkiff() {
   try {
     const dest = felTrack();
     await clearMatrix(skiffDevice, { cells: [{ track: dest, entry: selected }] });
-    status(`cleared T${dest + 1} entry ${selected + 1} ✓`, "ok");
+    status(`cleared T${dest + 1} entry ${entryLetter(selected)} ✓`, "ok");
     readDeviceState(true).catch(() => null);
   } catch (e) {
     status(String(e.message || e), "err");
@@ -1034,12 +1037,12 @@ function paintWording() {
 function paintTarget() {
   const el = document.getElementById("wtarget");
   if (!el) return;
-  const t = track + 1, e = selected + 1;
+  const t = track + 1, e = entryLetter(selected);
   if (fwInfo?.caps?.list2) {
     const blk = blockOf(track);
-    el.textContent = `→ T${t} · entry ${e}` + (blk ? ` · block ${blk.lo}-${blk.hi}` : " · no block (T1-T4 only)");
-    el.title = `WRITE puts this sequence on T${t} entry ${e} (a pattern in the pool). ` +
-               (blk ? `WRITE 16 fills T${t} entries 1-16 with patterns ${blk.lo}-${blk.hi}. ` : `T${t} has no block of 16: the pool is 64 patterns. `) +
+    el.textContent = `→ T${t} · pattern ${e}` + (blk ? ` · pool ${blk.lo}-${blk.hi}` : " · no block left (T1-T4 only)");
+    el.title = `WRITE puts this pattern on T${t} entry ${e} (one pattern of the pool). ` +
+               (blk ? `WRITE 16 fills T${t} entries A-P with patterns ${blk.lo}-${blk.hi}. ` : `T${t} has no block of 16: the pool is 64 patterns. `) +
                `CLEAR empties T${t} entry ${e}.`;
     el.dataset.mode = "skiff";
   } else {
@@ -1791,7 +1794,7 @@ function switchTrack(t) {
   if (ft) ft.value = String(track);
   renderBank(); renderBuffer(); renderRoll();
   followTrack(track + 1);
-  status(`track ${track + 1} of ${NTRK_DEFAULT} · ${bank.filter(Boolean).length} sequences`);
+  status(`T${track + 1} of ${NTRK_DEFAULT} · patterns A-P · ${bank.filter(Boolean).length} filled`);
   paintTarget();
   paintTrackState();
 }
