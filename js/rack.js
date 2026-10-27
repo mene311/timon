@@ -942,9 +942,13 @@ function paintProfile() {
   if (steps) steps.style.display = "none";
   renderRoll();
   const freezeBtn = document.getElementById("freeze");
-  if (freezeBtn) freezeBtn.title = "Write the selected sequence into the target track (F)";
+  if (freezeBtn) freezeBtn.title = fwInfo?.caps?.list2
+    ? "Write this sequence into the unit: one pattern in the pool, named by the entry shown on the left"
+    : "Write the selected sequence into the target track (F)";
   const fillBtn = document.getElementById("fill");
-  if (fillBtn) fillBtn.title = "Write all 16 sequences of this track into its block of the pool (T1 1-16, T2 17-32, T3 33-48, T4 49-64)";
+  if (fillBtn) fillBtn.title = fwInfo?.caps?.list2
+    ? "Write all 16 sequences of this track into its own block of the pool (T1 1-16, T2 17-32, T3 33-48, T4 49-64)"
+    : "Write all 16 sequences into projects A-D (slots 1-4 -> A tracks 1-4, then B, C, D)";
   const clearBtn = document.getElementById("clearall");
   if (clearBtn) clearBtn.title = fwInfo?.caps?.list2
     ? "Clear this entry on the target track (a 2.0 unit: LIST CLEAR; its pattern goes when nothing else names it)"
@@ -961,6 +965,7 @@ async function detectFirmware() {
   } catch { fwInfo = null; }
   profile = fwInfo ? "felucca" : "baudgirl";
   paintProfile();
+  paintWording();                         // the unit just told us which vocabulary applies
   if (fwInfo) status(`FM-1 runs ${fwInfo.version} · freeze writes one of ${fwInfo.ntrk} tracks, ${fwInfo.nstep} steps`, "ok");
   else status("FM-1 found, but it did not answer the firmware probe — using the FM-1+VA path", "err");
   return fwInfo;
@@ -1010,6 +1015,37 @@ const TEMPO_LINKS = [["pull", "BPM ⤓", "tempo follows the FM-1"], ["push", "BP
                      ["both", "BPM ⤓⤒", "whichever changed last wins"], ["off", "BPM", "no tempo sync"]];
 let tempoLink = (() => { try { return localStorage.getItem(TEMPO_LINK_KEY) || "pull"; } catch { return "pull"; } })();
 const linkHas = (d) => tempoLink === "both" || tempoLink === d;
+
+// Where the next write goes, in the unit's words: track, entry, and the pattern (or block) it lands
+// in. Felucca's projects are only mentioned on firmware that actually has them.
+// The buttons' words follow the firmware: a pool/entry unit gets WRITE / WRITE 16 / CLEAR, an older one
+// keeps its own vocabulary. Called at build, on every track/entry change and whenever the unit answers.
+function paintWording() {
+  const skiff = !!fwInfo?.caps?.list2;
+  const f = document.getElementById("freeze"), fl = document.getElementById("fill"), cl = document.getElementById("clearall");
+  if (f) f.textContent = skiff ? "WRITE" : "Freeze";
+  if (fl) fl.textContent = skiff ? "WRITE 16" : "Write 16";
+  if (cl) cl.textContent = skiff ? "CLEAR" : "Clear track";
+  paintTarget();
+}
+
+function paintTarget() {
+  const el = document.getElementById("wtarget");
+  if (!el) return;
+  const t = track + 1, e = selected + 1;
+  if (fwInfo?.caps?.list2) {
+    const blk = blockOf(track);
+    el.textContent = `→ T${t} · entry ${e}` + (blk ? ` · block ${blk.lo}-${blk.hi}` : " · no block (T1-T4 only)");
+    el.title = `WRITE puts this sequence on T${t} entry ${e} (a pattern in the pool). ` +
+               (blk ? `WRITE 16 fills T${t} entries 1-16 with patterns ${blk.lo}-${blk.hi}. ` : `T${t} has no block of 16: the pool is 64 patterns. `) +
+               `CLEAR empties T${t} entry ${e}.`;
+    el.dataset.mode = "skiff";
+  } else {
+    el.textContent = `→ track ${t}`;
+    el.title = fwInfo ? `${fwInfo.version}: no pool or entries, so WRITE writes steps into its track` : "no unit yet";
+    el.dataset.mode = "felucca";
+  }
+}
 
 function paintTempoLink() {
   const b = document.getElementById("tempolink");
@@ -1846,6 +1882,7 @@ function switchTrack(t) {
   renderBank(); renderBuffer(); renderRoll();
   followTrack(track + 1);
   status(`track ${track + 1} of ${NTRK_DEFAULT} · ${bank.filter(Boolean).length} sequences`);
+  paintTarget();
   paintTrackState();
 }
 
@@ -1856,6 +1893,7 @@ function selectSlot(next) {
   const from = activeTrack();
   saveTrackState();
   selected = next;
+  paintTarget();                          // the entry just moved: say where a write would go
   const to = activeTrack();
   if (to !== from) {
     if (restoreTrackState(to)) {
@@ -2103,6 +2141,10 @@ function buildTransport() {
   // all follow the one choice (they stay in lockstep with the selected cell).
   ft.addEventListener("change", () => switchTrack(felTrack()));
   // DRUM: the track's own switch, kept with its knobs (T6 is a drum track by default below)
+  const wt = document.createElement("span");
+  wt.id = "wtarget";
+  wt.setAttribute("style", "font:600 10px/1.4 inherit;letter-spacing:.03em;opacity:.8;align-self:center;white-space:nowrap");
+  ft.insertAdjacentElement("beforebegin", wt);
   const db = document.createElement("button");
   db.id = "drummode";
   db.className = "glink";
@@ -2127,6 +2169,7 @@ function buildTransport() {
   bb.title = "Read the whole unit's memory (29 objects, CRC-checked) and download it as JSON";
   bb.addEventListener("click", () => { readBackup(); });
   buildDeviceState();
+  paintWording();
   paintTempoLink();                       // the button shows the stored state as soon as it exists
   tb.addEventListener("click", () => {
     const i = TEMPO_LINKS.findIndex(([k]) => k === tempoLink);
@@ -2140,6 +2183,7 @@ function buildTransport() {
     state.drums = !state.drums;
     saveTrackState();
     paintDrumMode();
+    paintTarget();
     doGenerate(false);
     status(state.drums ? `T${track + 1} is a drum track (lanes, no pitch)` : `T${track + 1} plays pitched notes`, "ok");
   });

@@ -139,6 +139,14 @@ await (async () => {
   });
 })();
 
+t("the write target is spelled out, and speaks Felucca only when it must", () => {
+  const el = document.getElementById("wtarget");
+  assert.ok(el, "no #wtarget readout");
+  assert.equal(el.dataset.mode, "felucca", "no unit connected yet, so the old vocabulary applies");
+  assert.match(el.textContent, /track \d/);
+  assert.equal(document.getElementById("freeze").textContent, "Freeze", "no 2.0 caps: the old label");
+});
+
 t("the tempo link button exists, offers four states and remembers the choice", () => {
   const b = document.getElementById("tempolink");
   assert.ok(b, "no #tempolink");
