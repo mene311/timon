@@ -839,16 +839,20 @@ function stepsOf(pattern, info) {
   return { steps: fel.pulseSteps(pattern, nstep, Math.round(state.velocity ?? 100), Math.max(1, state.noteLen ?? 1)), depth };
 }
 
-function skiffReady() {
-  if (!fwInfo) return false;
-  if (!fwInfo.caps?.list2) return false;               // NEW/COPY+: the entry model only exists there
-  return true;
+function skiffReady() { return !!fwInfo?.caps?.list2; }
+
+// Timón writes to the pool and its entries, nothing else. Firmware without them (Felucca's projects,
+// FM-1+VA, ...) is refused in words instead of being written along a second, older path.
+function needSkiff() {
+  const v = fwInfo?.version ? ` (${fwInfo.version})` : "";
+  return `this unit has no pattern pool or entries${v}: Timón writes to Skiff 2.0's 64-pattern pool and its ` +
+         `6 x 16 entries only - the project path was removed, so nothing was written`;
 }
 
 async function doFreezeSkiff(slotIndex) {
   if (busy || !bank[slotIndex]) return;
   const info = fwInfo ?? await detectFirmware();
-  if (!skiffReady()) return doFreezeFelucca(slotIndex);
+  if (!skiffReady()) return status(needSkiff(), "err");
   busy = true;
   try {
     const dest = felTrack();
@@ -869,7 +873,7 @@ async function doFreezeSkiff(slotIndex) {
 async function doFillSkiff() {
   if (busy) return;
   const info = fwInfo ?? await detectFirmware();
-  if (!skiffReady()) return doSendAllFelucca();
+  if (!skiffReady()) return status(needSkiff(), "err");
   const dest = felTrack();
   const block = blockOf(dest);
   if (!block) {
@@ -893,7 +897,7 @@ async function doFillSkiff() {
 async function doClearSkiff() {
   if (busy) return;
   const info = fwInfo ?? await detectFirmware();
-  if (!skiffReady()) return doClearTrackFelucca();
+  if (!skiffReady()) return status(needSkiff(), "err");
   busy = true;
   try {
     const dest = felTrack();
@@ -908,17 +912,20 @@ async function doClearSkiff() {
 async function doFreeze(slotIndex) {
   if (!bank[slotIndex]) return;
   const info = fwInfo ?? await detectFirmware();          // ask first: the path depends on the answer
-  return info?.caps?.list2 ? doFreezeSkiff(slotIndex) : doFreezeFelucca(slotIndex);
+  if (!info?.caps?.list2) return status(needSkiff(), "err");
+  return doFreezeSkiff(slotIndex);
 }
 
 async function doSendAll() {
   const info = fwInfo ?? await detectFirmware();
-  return info?.caps?.list2 ? doFillSkiff() : doSendAllFelucca();
+  if (!info?.caps?.list2) return status(needSkiff(), "err");
+  return doFillSkiff();
 }
 
 async function doClearAll() {
   const info = fwInfo ?? await detectFirmware();
-  return info?.caps?.list2 ? doClearSkiff() : doClearTrackFelucca();
+  if (!info?.caps?.list2) return status(needSkiff(), "err");
+  return doClearSkiff();
 }
 
 // --------------------------------------------------------------------------- //
@@ -981,17 +988,7 @@ async function felReq(cmd, args, timeoutMs = 1500, tries = 2) {
   return null;
 }
 
-async function felGetStep(track, index) {
-  const r = await felReq(fel.CMD.TRACK_STEP, [track, index]);
-  if (!r) throw new Error(`no reply for track ${track + 1} step ${index + 1}`);
-  return fel.readStep(r);
-}
 
-async function felSetStep(track, index, st) {
-  const r = await felReq(fel.CMD.TRACK_STEP, [track, index, ...fel.stepBytes(st)]);
-  if (!r) throw new Error(`write refused at track ${track + 1} step ${index + 1}`);
-  return fel.readStep(r);
-}
 
 // GET/SET (2/3): scope 1 = a global parameter; v14 = 2 bytes (value + 8192).
 // The tempo is a global parameter (core.h: G_BPM = 0): both directions are plain GET/SET.
@@ -1022,10 +1019,15 @@ const linkHas = (d) => tempoLink === "both" || tempoLink === d;
 // keeps its own vocabulary. Called at build, on every track/entry change and whenever the unit answers.
 function paintWording() {
   const skiff = !!fwInfo?.caps?.list2;
-  const f = document.getElementById("freeze"), fl = document.getElementById("fill"), cl = document.getElementById("clearall");
-  if (f) f.textContent = skiff ? "WRITE" : "Freeze";
-  if (fl) fl.textContent = skiff ? "WRITE 16" : "Write 16";
-  if (cl) cl.textContent = skiff ? "CLEAR" : "Clear track";
+  const why = skiff ? "" : (fwInfo ? needSkiff() : "connect the unit over USB to write");
+  for (const [id, label] of [["freeze", "WRITE"], ["fill", "WRITE 16"], ["clearall", "CLEAR"]]) {
+    const b = document.getElementById(id);
+    if (!b) continue;
+    b.textContent = label;                              // one vocabulary: the unit's
+    b.disabled = !skiff;
+    b.style.opacity = skiff ? "" : ".45";
+    if (!skiff) b.title = why;
+  }
   paintTarget();
 }
 
@@ -1041,9 +1043,9 @@ function paintTarget() {
                `CLEAR empties T${t} entry ${e}.`;
     el.dataset.mode = "skiff";
   } else {
-    el.textContent = `→ track ${t}`;
-    el.title = fwInfo ? `${fwInfo.version}: no pool or entries, so WRITE writes steps into its track` : "no unit yet";
-    el.dataset.mode = "felucca";
+    el.textContent = "→ —";
+    el.title = fwInfo ? needSkiff() : "no unit connected";
+    el.dataset.mode = "none";
   }
 }
 
@@ -1117,10 +1119,6 @@ async function followTrack(track) {
 }
 
 // PROJECT (9): op 0 load, 1 save, 2 query; slot 0..3. The reply is op, slot, used.
-async function felProject(op, slot, timeoutMs = 2500) {
-  const r = await felReq(fel.CMD.PROJECT, [op, slot], timeoutMs, 1);
-  return r && r.length >= 3 ? { op: r[0], slot: r[1], used: r[2] } : null;
-}
 
 // "Send A–D": the Felucca equivalent of Baud Girl's Send 16. Felucca has no
 // 16-pattern bank — it has four projects, each with one 64-step sequence per
@@ -1128,98 +1126,10 @@ async function felProject(op, slot, timeoutMs = 2500) {
 // 13–16 to D. Per project: load it, write only the steps that differ, save it.
 // Loads replace the live state (the sounds of that project come with it) and a
 // save writes flash (~2 s) with the transport stopped.
-async function doSendAllFelucca() {
-  if (busy || !bank.length) return;
-  if (!confirm("Write all 16 slots into the FM-1's four projects (A–D)?\n\n" +
-               "Slots 1–4 → A tracks 1–4, 5–8 → B, 9–12 → C, 13–16 → D.\n\n" +
-               "Each project's steps are replaced (its own sounds are kept and saved back). " +
-               "Loading replaces the FM-1's live state, and saving writes flash with the transport stopped.")) return;
-  busy = true;
-  try {
-    const info = fwInfo ?? await detectFirmware();
-    const nstep = info?.nstep || 64;
-    let changedAll = 0;
-    for (let b = 0; b < 4; b++) {
-      const letter = "ABCD"[b];
-      status(`project ${letter}: loading…`);
-      const load = await felProject(0, b, 2500);
-      if (!load) throw new Error(`project ${letter}: no reply to the load — is the FM-1 connected?`);
-      let bankChanged = 0;
-      for (let t = 0; t < 4; t++) {
-        const slot = b * 4 + t;
-        const want = fel.pulseSteps(bank[slot], nstep, Math.round(state.velocity ?? 100), Math.max(1, state.noteLen ?? 1));
-        let changed = 0;
-        for (let i = 0; i < nstep; i++) {
-          const cur = await felGetStep(t, i);
-          if (!fel.sameStep(want[i], cur)) { await felSetStep(t, i, want[i]); changed++; }
-        }
-        bankChanged += changed;
-        status(`project ${letter} · track ${t + 1} · slot ${slot + 1}: ${changed}/${nstep} steps`);
-      }
-      changedAll += bankChanged;
-      if (bankChanged === 0 && load.used) {
-        status(`project ${letter}: already matches — not saved`);
-        continue;
-      }
-      status(`project ${letter}: saving (flash, ~2 s)…`);
-      const save = await felProject(1, b, 8000);
-      if (!save) throw new Error(`project ${letter}: the save got no reply — stop the song/chain and retry`);
-    }
-    status(`all 16 slots written to projects A–D ✓ (${changedAll} steps changed)`, "ok");
-  } catch (e) {
-    status(String(e.message || e), "err");
-  } finally { busy = false; }
-}
 
 // Freeze slot -> one Felucca track. A dry run reads the track first and writes
 // only the steps that differ, so a repeat freeze is a read-only no-op.
-async function doFreezeFelucca(slotIndex) {
-  if (busy || !bank[slotIndex]) return;
-  busy = true;
-  const track = felTrack();
-  try {
-    const info = fwInfo ?? await detectFirmware();
-    const nstep = info?.nstep || 64;
-    const want = fel.pulseSteps(bank[slotIndex], nstep, Math.round(state.velocity ?? 100), Math.max(1, state.noteLen ?? 1));
-    status(`freezing slot ${slotIndex + 1} → track ${track + 1}: reading ${nstep} steps…`);
-    const plan = [];
-    for (let i = 0; i < nstep; i++) {
-      const cur = await felGetStep(track, i);
-      if (!fel.sameStep(want[i], cur)) plan.push(i);
-      if (i % 16 === 15) status(`freezing slot ${slotIndex + 1} → track ${track + 1}: read ${i + 1}/${nstep}`);
-    }
-    if (!plan.length) { status(`slot ${slotIndex + 1} is already on track ${track + 1} ✓`, "ok"); return; }
-    for (let k = 0; k < plan.length; k++) {
-      const i = plan[k];
-      const read = await felSetStep(track, i, want[i]);
-      if (read.n !== want[i].n || read.notes.join() !== want[i].notes.join())
-        throw new Error(`step ${i + 1} did not take (device holds n=${read.n})`);
-      if (k % 8 === 7) status(`freezing slot ${slotIndex + 1} → track ${track + 1}: wrote ${k + 1}/${plan.length}`);
-    }
-    status(`slot ${slotIndex + 1} frozen → track ${track + 1} ✓ (${plan.length}/${nstep} steps changed)`, "ok");
-  } catch (e) {
-    status(String(e.message || e), "err");
-  } finally { busy = false; }
-}
 
-async function doClearTrackFelucca() {
-  if (busy) return;
-  const track = felTrack();
-  if (!confirm(`Clear the ${fwInfo?.nstep || 64} steps of track ${track + 1} on the FM-1?`)) return;
-  busy = true;
-  try {
-    const info = fwInfo ?? await detectFirmware();
-    const nstep = info?.nstep || 64;
-    const rest = fel.restStep();
-    for (let i = 0; i < nstep; i++) {
-      await felSetStep(track, i, rest);
-      if (i % 16 === 15) status(`clearing track ${track + 1}: ${i + 1}/${nstep}`);
-    }
-    status(`track ${track + 1} cleared ✓ (${nstep} steps)`, "ok");
-  } catch (e) {
-    status(String(e.message || e), "err");
-  } finally { busy = false; }
-}
 
 // --------------------------------------------------------------------------- //
 // Audition (browser synth + live MIDI)
@@ -2189,7 +2099,7 @@ function buildTransport() {
   });
   document.getElementById("fill").addEventListener("click", doSendAll);
   document.getElementById("clearall").addEventListener("click",
-    () => (profile === "felucca" ? doClearTrackFelucca() : doClearAll()));
+    () => doClearAll());
   document.getElementById("diag")?.addEventListener("click", dumpGset);
   renderPresets();
 }

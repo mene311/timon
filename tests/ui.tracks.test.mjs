@@ -139,12 +139,14 @@ await (async () => {
   });
 })();
 
-t("the write target is spelled out, and speaks Felucca only when it must", () => {
+t("with no unit, the write buttons are off and say why", () => {
   const el = document.getElementById("wtarget");
   assert.ok(el, "no #wtarget readout");
-  assert.equal(el.dataset.mode, "felucca", "no unit connected yet, so the old vocabulary applies");
-  assert.match(el.textContent, /track \d/);
-  assert.equal(document.getElementById("freeze").textContent, "Freeze", "no 2.0 caps: the old label");
+  assert.equal(el.dataset.mode, "none");
+  assert.equal(document.getElementById("freeze").textContent, "WRITE");
+  assert.equal(document.getElementById("freeze").disabled, true, "writing needs a pool/entry unit");
+  assert.match(document.getElementById("freeze").title, /connect the unit/i);
+  assert.equal(document.getElementById("clearall").disabled, true);
 });
 
 t("the tempo link button exists, offers four states and remembers the choice", () => {
