@@ -98,6 +98,8 @@ const sectByTitle = (title) => [...document.querySelectorAll("section.sect")]
 
 await (async () => {
   const ft = document.getElementById("ftrack");
+  const melodyOrder = [...document.querySelectorAll("#panel section.sect")].map((x) => x.querySelector("h3").textContent);
+  const melodyPitchNode = sectByTitle("Pitch");
   ft.value = "5";                                        // T6: a drum track by default
   ft.dispatchEvent(new window.Event("change"));
   await sleep(10);
@@ -105,16 +107,19 @@ await (async () => {
   t("T6 comes up as a drum track", () => {
     assert.equal(document.getElementById("drummode").textContent.trim(), "DRUM ✓");
   });
-  t("a drum track hides the pitch section and shows the lanes", () => {
-    assert.equal(sectByTitle("Pitch").style.display, "none", "Pitch must be off");
-    assert.equal(sectByTitle("Shape").style.display, "none", "the pitch shaping knobs too");
-    assert.notEqual(sectByTitle("Lanes").style.display, "none", "the lanes must be shown");
+  t("a drum track turns the Pitch section itself into Lanes", () => {
+    assert.equal(sectByTitle("Pitch"), undefined, "there is no separate Pitch section left");
+    const lanes = sectByTitle("Lanes");
+    assert.ok(lanes, "the section is retitled Lanes");
+    assert.equal(lanes.dataset.was, "pitch", "and it is the same element that was Pitch");
+    assert.ok(lanes.style.display !== "none");
+    assert.equal(sectByTitle("Shape").style.display, "none", "the pitch shaping knobs are off");
   });
-  t("the lanes sit where Pitch was, not appended at the end of the panel", () => {
+  t("no section was added: the same boxes, one retitled in place", () => {
     const order = [...document.querySelectorAll("#panel section.sect")].map((x) => x.querySelector("h3").textContent);
-    const iLanes = order.indexOf("Lanes"), iMemory = order.indexOf("Memory"), iRhythm = order.indexOf("Rhythm");
-    assert.ok(iLanes > iRhythm && iLanes < iMemory,
-              `panel order was ${order.join(" | ")}: Lanes must come before Memory (it replaces Pitch)`);
+    assert.equal(order.length, melodyOrder.length, `was ${melodyOrder.join(" | ")}, now ${order.join(" | ")}`);
+    assert.deepEqual(order, melodyOrder.map((t) => (t === "Pitch" ? "Lanes" : t)));
+    assert.equal(sectByTitle("Lanes"), melodyPitchNode, "the Lanes box IS the box that was Pitch");
   });
   t("the lane knobs are the four lanes plus rotate and grid", () => {
     const labels = [...sectByTitle("Lanes").querySelectorAll(".k-lab")].map((e) => e.textContent.trim()).join(" ");
@@ -126,9 +131,10 @@ await (async () => {
   ft.value = "0";
   ft.dispatchEvent(new window.Event("change"));
   await sleep(10);
-  t("a melody track gets Pitch and Shape back and loses the lanes", () => {
-    assert.equal(sectByTitle("Pitch").style.display, "", "Pitch must be visible");
-    assert.equal(sectByTitle("Lanes").style.display, "none", "the lanes must be hidden");
+  t("a melody track gets the section back as Pitch, with Shape", () => {
+    assert.ok(sectByTitle("Pitch"), "Pitch is back");
+    assert.equal(sectByTitle("Lanes"), undefined, "and it is not called Lanes any more");
+    assert.notEqual(sectByTitle("Shape").style.display, "none", "Shape is shown again");
     assert.equal(document.getElementById("drummode").textContent.trim(), "DRUM");
   });
 })();

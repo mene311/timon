@@ -4,7 +4,7 @@
 import { generate, generateBank, SCALES, LFO_WAVES, midiName, classicName, euclid } from "./generator.js?v=71";
 import { encodeWrite, emptyPattern } from "./pattern.js?v=65";
 import * as midi from "./midi.js?v=70";
-import * as fel from "./felucca.js?v=3";
+import * as fel from "./felucca.js?v=4";
 import { writeMatrix, writeBlock, clearMatrix, blockOf } from "./skiff-write.js?v=6";
 import { summarise, headline } from "./devstate.js?v=1";
 import { BACKUP_CMD, captureBackup, summariseArchive } from "./backup.js?v=2";
@@ -907,15 +907,18 @@ async function doClearSkiff() {
 
 async function doFreeze(slotIndex) {
   if (!bank[slotIndex]) return;
-  return fwInfo && fwInfo.caps?.list2 ? doFreezeSkiff(slotIndex) : doFreezeFelucca(slotIndex);
+  const info = fwInfo ?? await detectFirmware();          // ask first: the path depends on the answer
+  return info?.caps?.list2 ? doFreezeSkiff(slotIndex) : doFreezeFelucca(slotIndex);
 }
 
 async function doSendAll() {
-  return fwInfo && fwInfo.caps?.list2 ? doFillSkiff() : doSendAllFelucca();
+  const info = fwInfo ?? await detectFirmware();
+  return info?.caps?.list2 ? doFillSkiff() : doSendAllFelucca();
 }
 
 async function doClearAll() {
-  return fwInfo && fwInfo.caps?.list2 ? doClearSkiff() : doClearTrackFelucca();
+  const info = fwInfo ?? await detectFirmware();
+  return info?.caps?.list2 ? doClearSkiff() : doClearTrackFelucca();
 }
 
 // --------------------------------------------------------------------------- //
@@ -1546,32 +1549,34 @@ function buildRack() {
     ]),
   );
 
-  // the drum track's half of the rack: the same knobs, no new pages — four lane densities, the
-  // rotation of the figure across the 16 slots, and the grid the hits snap to.
-  lanesSect = sect("Lanes", 6, [
-    R("kick", knob({ label: "Kick", min: 0, max: 16, value: state.kick, def: DEFAULT.kick, size: "md",
-      format: (v) => `${Math.round(v)}`, tip: "Euclidean pulses per bar on the kick lane (GM 36). 4 = four on the floor.",
+  // The drum half is not another section: it is the Pitch section itself, retitled and with its knobs
+  // swapped. One element, one place in the panel, no reflow and nothing to learn twice.
+  const laneKids = [
+    R("kick", knob({ label: "Kick", min: 0, max: 16, value: state.kick, def: DEFAULT.kick, size: "sm",
+      format: (v) => `${Math.round(v)}`, tip: "Euclidean pulses per bar, kick lane (GM 36).",
       onInput: (v) => { state.kick = Math.round(v); scheduleRegen(); } })),
-    R("snare", knob({ label: "Snare", min: 0, max: 16, value: state.snare, def: DEFAULT.snare, size: "md",
-      format: (v) => `${Math.round(v)}`, tip: "Euclidean pulses per bar on the snare lane (GM 38). 2 = backbeat at 8/16.",
+    R("snare", knob({ label: "Snare", min: 0, max: 16, value: state.snare, def: DEFAULT.snare, size: "sm",
+      format: (v) => `${Math.round(v)}`, tip: "Euclidean pulses per bar, snare lane (GM 38).",
       onInput: (v) => { state.snare = Math.round(v); scheduleRegen(); } })),
-    R("chh", knob({ label: "Hat", min: 0, max: 16, value: state.chh, def: DEFAULT.chh, size: "md",
-      format: (v) => `${Math.round(v)}`, tip: "Closed hat (GM 42). 8 = eighth notes.",
+    R("chh", knob({ label: "Hat", min: 0, max: 16, value: state.chh, def: DEFAULT.chh, size: "sm",
+      format: (v) => `${Math.round(v)}`, tip: "Closed hat (GM 42): 8 = eighths.",
       onInput: (v) => { state.chh = Math.round(v); scheduleRegen(); } })),
-    R("ohh", knob({ label: "Open hat", min: 0, max: 16, value: state.ohh, def: DEFAULT.ohh, size: "md",
+    R("ohh", knob({ label: "Open hat", min: 0, max: 16, value: state.ohh, def: DEFAULT.ohh, size: "sm",
       format: (v) => `${Math.round(v)}`, tip: "Open hat (GM 46), choked by the closed hat on the unit.",
       onInput: (v) => { state.ohh = Math.round(v); scheduleRegen(); } })),
-    R("lrot", knob({ label: "Rotate", min: 0, max: 15, value: state.lrot, def: DEFAULT.lrot, size: "md",
-      format: (v) => `${Math.round(v)}`, tip: "How far each of the 16 sequences turns the hat figure: slot k turns it Rotate + k steps.",
+    R("lrot", knob({ label: "Rotate", min: 0, max: 15, value: state.lrot, def: DEFAULT.lrot, size: "sm",
+      format: (v) => `${Math.round(v)}`, tip: "Each of the 16 sequences turns the hat figure one more step.",
       onInput: (v) => { state.lrot = Math.round(v); scheduleRegen(); } })),
-    R("lgrid", knob({ label: "Grid", min: 1, max: 4, value: state.lgrid, def: DEFAULT.lgrid, size: "md",
-      format: (v) => v == 1 ? "1/16" : v == 2 ? "1/8" : v == 3 ? "1/4·" : "1/4",
-      tip: "Snap the lane hits to the step grid: every step, every 2, every 4.", onInput: (v) => { state.lgrid = Math.round(v); scheduleRegen(); } })),
-  ]);
-  // the lanes take the melody half's own place in the panel (not a section stuck at the bottom):
-  // Pitch and Shape are hidden and Lanes sits where they were, so the layout does not jump.
-  pitchSect.insertAdjacentElement("afterend", lanesSect);
-  rackSections = { pitch: pitchSect, shape: shapeSect, lanes: lanesSect };
+    R("lgrid", knob({ label: "Grid", min: 1, max: 4, value: state.lgrid, def: DEFAULT.lgrid, size: "sm",
+      format: (v) => v == 1 ? "1/16" : v == 2 ? "1/8" : "1/4", tip: "Snap the lane hits to the grid.",
+      onInput: (v) => { state.lgrid = Math.round(v); scheduleRegen(); } })),
+  ];
+  for (const k of laneKids) { k.dataset.lane = "1"; k.style.display = "none"; }
+  const pitchGrid = pitchSect.querySelector(".sgrid");
+  pitchGrid.append(...laneKids);
+
+  rackSections = { pitch: pitchSect, shape: shapeSect, lanes: pitchSect };   // (lanes ARE the pitch section)
+  pitchSect.dataset.was = "pitch";                                     // (the test reads this)
   paintDrumMode();
 }
 
@@ -1754,8 +1759,14 @@ let rackSections = { pitch: null, shape: null, lanes: null };
 // place) so the same knobs keep doing the work and nothing is added to learn.
 function paintDrumMode() {
   const on = !!state.drums;
-  for (const el of [rackSections.pitch, rackSections.shape]) if (el) el.style.display = on ? "none" : "";
-  if (rackSections.lanes) rackSections.lanes.style.display = on ? "" : "none";
+  const p = rackSections.pitch;
+  if (p) {
+    const h = p.querySelector("h3");
+    if (h) h.textContent = on ? "Lanes" : "Pitch";        // the same section, renamed and swapped
+    for (const el of p.querySelectorAll(".sgrid > *"))
+      el.style.display = (el.dataset.lane === "1") === on ? "" : "none";
+  }
+  if (rackSections.shape) rackSections.shape.style.display = on ? "none" : "";
   const b = document.getElementById("drummode");
   if (b) {
     b.textContent = on ? "DRUM ✓" : "DRUM";

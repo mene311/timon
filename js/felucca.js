@@ -91,6 +91,17 @@ export function decodeInfo(args) {
     tags[id] = args.slice(at + 2, at + 2 + len);
     at += 2 + len;
   }
+  // A tag this table does not know stops the walk, and every tag after it would be lost - including the
+  // capability bits that decide whether the pool/entry path is even used. So whichever tags are missing,
+  // find them by their own two bytes; a payload byte pair like "58 01" does not occur in the others.
+  for (const id of Object.keys(INFO_TAGS).map(Number)) {
+    if (id in tags) continue;
+    const len = INFO_TAGS[id];
+    for (let i = 0; i + 2 + len <= args.length; i++) {
+      if (args[i] === id && args[i + 1] === 0x01) { tags[id] = args.slice(i + 2, i + 2 + len); break; }
+      if (i > args.length - 3) break;
+    }
+  }
   const c57 = tags[0x57]?.[0] ?? 0, c58 = tags[0x58]?.[0] ?? 0;
   const caps = {
     version,
