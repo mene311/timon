@@ -13,8 +13,9 @@ developer. Read this before writing anything here, including replies.
   try, in one or two lines, with the exact taps ("open Timón, pick T6, turn Kick").
 - Never explain the machinery unless he asks a question about it.
 - Assume an expert owner. He has flashed dozens of firmwares on this unit and knows the risks.
-  Never repeat standing cautions ("back up before flashing", "you may lose your patterns"). A risk
-  gets one clause, once, and only when it is new for this specific action.
+  Never repeat standing cautions ("back up before flashing", "you may lose your patterns").
+- The one risk that gets stated: bricking. A firmware or a step that can leave the unit unresponsive
+  gets one plain sentence before he does it. Nothing else qualifies.
 
 ## Prove it the way he will test it
 
